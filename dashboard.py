@@ -1,15 +1,15 @@
 import os
-import subprocess
-from flask import Flask, render_template_string, request, redirect, url_for
 import json
 import subprocess
+from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
 # Fichiers de sauvegarde persistante
 PERMS_FILE = "permissions.json"
+REMINDERS_FILE = "reminders.json"
 
-# Dictionnaire par défaut
+# Dictionnaire par défaut des permissions
 default_permissions = {
     "startguess": "admin",
     "higherlower": "everyone",
@@ -23,7 +23,7 @@ default_permissions = {
     "reminders": "everyone"
 }
 
-# Fonction pour charger les permissions (depuis le fichier s'il existe, sinon par défaut)
+# --- CHARGEMENT ET SAUVEGARDE DES PERMISSIONS ---
 def load_permissions():
     if os.path.exists(PERMS_FILE):
         try:
@@ -33,7 +33,6 @@ def load_permissions():
             pass
     return default_permissions.copy()
 
-# Fonction pour sauvegarder les permissions dans le fichier
 def save_permissions(perms):
     try:
         with open(PERMS_FILE, "w", encoding="utf-8") as f:
@@ -41,12 +40,36 @@ def save_permissions(perms):
     except Exception as e:
         print(f"Erreur lors de la sauvegarde des permissions : {e}")
 
-# Charger les permissions au démarrage
 command_permissions = load_permissions()
 
-# Stockage des rappels : id -> {"title": str, "channel_id": int, "role_name": str, "interval_minutes": int}
-reminders_db = {}
-reminder_counter = 1
+
+# --- CHARGEMENT ET SAUVEGARDE DES RAPPELS ---
+def load_reminders():
+    if os.path.exists(REMINDERS_FILE):
+        try:
+            with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Convertit les clés stockées en string de nouveau en int
+                return {int(k): v for k, v in data.items()}
+        except Exception:
+            pass
+    return {}
+
+def save_reminders(reminders):
+    try:
+        with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reminders, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde des rappels : {e}")
+
+reminders_db = load_reminders()
+
+# Gestion de l'ID incrémentiel des rappels
+if reminders_db:
+    reminder_counter = max(reminders_db.keys()) + 1
+else:
+    reminder_counter = 1
+
 sync_status = None
 
 DASHBOARD_TEMPLATE = """
@@ -159,7 +182,7 @@ def index():
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
         command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
-        save_permissions(command_permissions) # <--- Indispensable pour enregistrer dans le fichier
+        save_permissions(command_permissions)  # Sauvegarde persistante
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
@@ -179,6 +202,7 @@ def add_reminder():
                 "interval_minutes": int(interval)
             }
             reminder_counter += 1
+            save_reminders(reminders_db)  # Sauvegarde persistante
         except ValueError:
             pass
     return redirect(url_for("index"))
@@ -187,6 +211,7 @@ def add_reminder():
 def delete_reminder(r_id):
     if r_id in reminders_db:
         del reminders_db[r_id]
+        save_reminders(reminders_db)  # Sauvegarde persistante
     return redirect(url_for("index"))
 
 @app.route("/sync/discord", methods=["POST"])
@@ -204,14 +229,12 @@ def sync_github():
             subprocess.run(["git", "init"], capture_output=True, text=True, check=True)
             subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
         else:
-            # Vérifie si 'origin' existe déjà, sinon l'ajoute, sinon met à jour son URL
             remotes = subprocess.run(["git", "remote"], capture_output=True, text=True)
             if "origin" not in remotes.stdout:
                 subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
             else:
                 subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True, text=True)
 
-        # Force la récupération et le pull
         subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True, timeout=10)
         subprocess.run(["git", "branch", "-M", "main"], capture_output=True, text=True)
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, timeout=10)
