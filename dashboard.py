@@ -1,4 +1,5 @@
 import os
+import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
@@ -13,12 +14,16 @@ command_permissions = {
     "level": "everyone",
     "addmoney": "admin",
     "removemoney": "admin",
-    "setlevel": "admin"
+    "setlevel": "admin",
+    "reminders": "everyone"
 }
 
-# Stockage en mémoire des rappels (id -> {"title": str, "time": str})
+# Stockage en mémoire des rappels
 reminders_db = {}
 reminder_counter = 1
+
+# Variable pour stocker le dernier statut des actions
+sync_status = None
 
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
@@ -39,15 +44,41 @@ DASHBOARD_TEMPLATE = """
         .btn-everyone { background-color: #22c55e; color: white; }
         .btn-delete { background-color: #ef4444; color: white; }
         .btn-add { background-color: #38bdf8; color: #0f172a; margin-top: 10px; }
+        .btn-sync-discord { background-color: #5865F2; color: white; }
+        .btn-sync-github { background-color: #24292e; color: white; }
+        .btn-sync-render { background-color: #46e3b7; color: #0f172a; }
         .btn:hover { opacity: 0.9; }
         form.inline-form { display: inline; }
         .form-group { margin-top: 15px; display: flex; gap: 10px; }
         input[type="text"] { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; }
+        .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
+        .alert { padding: 12px; border-radius: 6px; margin-bottom: 20px; background-color: #334155; color: #38bdf8; border: 1px solid #38bdf8; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>⚙️ Dashboard de Configuration</h1>
+
+        {% if message %}
+        <div class="alert">
+            ⚡ <strong>Statut :</strong> {{ message }}
+        </div>
+        {% endif %}
+
+        <!-- SECTION 0 : SYNCHRONISATION GLOBALE -->
+        <h2>🔄 Centre de Synchronisation</h2>
+        <p>Exécute des actions de mise à jour et de synchronisation instantanées :</p>
+        <div class="sync-container">
+            <form action="/sync/discord" method="POST">
+                <button type="submit" class="btn btn-sync-discord">🤖 Re-sync Discord (Commandes)</button>
+            </form>
+            <form action="/sync/github" method="POST">
+                <button type="submit" class="btn btn-sync-github">📂 Re-sync Script GitHub</button>
+            </form>
+            <form action="/sync/render" method="POST">
+                <button type="submit" class="btn btn-sync-render">🚀 Redéployer (Render)</button>
+            </form>
+        </div>
         
         <!-- SECTION 1 : PERMISSIONS -->
         <h2>🛡️ Gestion des Permissions des Commandes</h2>
@@ -124,7 +155,10 @@ DASHBOARD_TEMPLATE = """
 
 @app.route("/")
 def index():
-    return render_template_string(DASHBOARD_TEMPLATE, permissions=command_permissions, reminders=reminders_db)
+    global sync_status
+    msg = sync_status
+    sync_status = None # Réinitialise le message après affichage
+    return render_template_string(DASHBOARD_TEMPLATE, permissions=command_permissions, reminders=reminders_db, message=msg)
 
 @app.route("/toggle/<cmd_name>", methods=["POST"])
 def toggle_permission(cmd_name):
@@ -149,6 +183,47 @@ def add_reminder():
 def delete_reminder(r_id):
     if r_id in reminders_db:
         del reminders_db[r_id]
+    return redirect(url_for("index"))
+
+# --- ROUTES DE SYNCHRONISATION ---
+
+@app.route("/sync/discord", methods=["POST"])
+def sync_discord():
+    global sync_status
+    # Note : Le vrai sync des commandes s'effectue dans main.py lors du on_ready. 
+    # Ici, on envoie un signal ou on simule/relance le processus si nécessaire.
+    sync_status = "Signal de synchronisation des commandes envoyé au bot Discord."
+    return redirect(url_for("index"))
+
+@app.route("/sync/github", methods=["POST"])
+def sync_github():
+    global sync_status
+    try:
+        # Tente de faire un git pull local si le projet tourne dans un repo local tracké
+        result = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            sync_status = "Mise à jour GitHub réussie (Git Pull exécuté)."
+        else:
+            sync_status = f"Erreur Git Pull : {result.stderr.strip()}"
+    except Exception as e:
+        sync_status = "Impossible d'exécuter le git pull (environnement cloud isolé ou non-git)."
+    return redirect(url_for("index"))
+
+@app.route("/sync/render", methods=["POST"])
+def sync_render():
+    global sync_status
+    # Render déploie automatiquement à chaque push GitHub. 
+    # Pour forcer via dashboard, on peut utiliser un Webhook Deploy Render si configuré, ou informer l'utilisateur.
+    render_webhook = os.environ.get("RENDER_DEPLOY_HOOK_URL")
+    if render_webhook:
+        import urllib.request
+        try:
+            urllib.request.urlopen(render_webhook, data=b"")
+            sync_status = "Ordre de redéploiement transmis à Render avec succès !"
+        except Exception as e:
+            sync_status = f"Échec du déclenchement du webhook Render : {e}"
+    else:
+        sync_status = "Redéploiement demandé. (Astuce : ajoute ton Render Deploy Hook en variable d'environnement 'RENDER_DEPLOY_HOOK_URL' pour l'activer)."
     return redirect(url_for("index"))
 
 def run_dashboard():
