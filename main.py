@@ -257,6 +257,47 @@ async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
         embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
+    @bot.tree.command(name="roulette", description="Parie des coins à la roulette (red, black ou green)")
+@app_commands.describe(bet="Montant de ta mise", choice="Choisis red, black ou green")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Rouge (x2)", value="red"),
+    app_commands.Choice(name="Noir (x2)", value="black"),
+    app_commands.Choice(name="Vert / Zéro (x14)", value="green")
+])
+async def roulette(interaction: discord.Interaction, bet: int, choice: str):
+    user_id = interaction.user.id
+
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    user_balances[user_id]["wallet"] -= bet
+
+    # Simulation de la roue (Rouge: 45%, Noir: 45%, Vert: 10%)
+    roll = random.choices(["red", "black", "green"], weights=[45, 45, 10])[0]
+
+    embed = discord.Embed(title="🎰 Roulette Casino", color=discord.Color.dark_embed())
+    embed.add_field(name="Ta mise", value=f"**{bet}** coins sur **{choice.upper()}**", inline=False)
+    embed.add_field(name="Résultat de la roue", value=f"**{roll.upper()}**", inline=False)
+
+    if roll == choice:
+        multiplier = 14 if roll == "green" else 2
+        winnings = bet * multiplier
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 Jackpot ! C'est tombé sur **{roll.upper()}**. Tu gagnes **{winnings}** coins !"
+        embed.color = discord.Color.green()
+    else:
+        embed.description = f"😢 Perdu ! C'est tombé sur **{roll.upper()}**. Tu perds ta mise."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
 
 # ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
 
