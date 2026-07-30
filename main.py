@@ -2,10 +2,11 @@ import os
 import random
 import discord
 import threading
+import json
+import asyncio
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dashboard import run_dashboard
-from discord.ext import tasks
 from dashboard import reminders_db
 
 # ── 1. CONFIGURATION DES INTENTS & DU BOT ──────────────────────────────────────
@@ -72,6 +73,56 @@ class GuessGameView:
             embed.add_field(name="Tentatives totales", value=f"**{total_attempts}** essai(s)", inline=True)
 
             await message.channel.send(embed=embed)
+
+
+# ── SYSTÈME DE GIVEAWAY ───────────────────────────────────────────────────────
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, db_data, prize):
+        super().__init__(timeout=None)
+        self.db_data = db_data
+        self.prize = prize
+        self.participants = set()
+
+    @discord.ui.button(label="🎉 Participer", style=discord.ButtonStyle.green, custom_id="giveaway_join")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        banned_roles = self.db_data.get("banned_roles", [])
+        user_roles = [role.name for role in interaction.user.roles]
+        
+        for banned in banned_roles:
+            if banned in user_roles:
+                await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer aux giveaways.", ephemeral=True)
+                return
+
+        if interaction.user.id in self.participants:
+            await interaction.response.send_message("Tu participes déjà à ce giveaway !", ephemeral=True)
+        else:
+            self.participants.add(interaction.user.id)
+            await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
+
+
+async def start_giveaway_timer(bot, channel, prize, duration_seconds, view, message):
+    await asyncio.sleep(duration_seconds)
+    
+    if not view.participants:
+        embed = discord.Embed(
+            title="🎉 Giveaway Terminé !", 
+            description=f"Lot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
+            color=discord.Color.red()
+        )
+        await message.edit(embed=embed, view=None)
+        await channel.send(f"Le giveaway pour **{prize}** est annulé par manque de participants.")
+        return
+
+    winner_id = random.choice(list(view.participants))
+    
+    embed = discord.Embed(
+        title="🎉 Giveaway Terminé !", 
+        description=f"Lot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>", 
+        color=discord.Color.gold()
+    )
+    await message.edit(embed=embed, view=None)
+    await channel.send(f"🎊 Félicitations <@{winner_id}> ! Tu remportes **{prize}** !")
 
 
 # ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
@@ -141,6 +192,44 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="giveaway", description="Lance un giveaway (selon les permissions configurées)")
+@app_commands.describe(prize="Le lot à gagner", duration="Durée en minutes")
+async def giveaway(interaction: discord.Interaction, prize: str, duration: int):
+    try:
+        with open("data.json", "r", encoding="utf-8") as f:
+            db_data = json.load(f)
+    except FileNotFoundError:
+        db_data = {"permissions": {}, "banned_roles": []}
+
+    permissions = db_data.get("permissions", {})
+    perm_setting = permissions.get("giveaway", "admin")
+    
+    is_admin = interaction.user.guild_permissions.administrator
+    if perm_setting == "admin" and not is_admin:
+        await interaction.response.send_message("❌ Cette commande est réservée aux administrateurs.", ephemeral=True)
+        return
+
+    banned_roles = db_data.get("banned_roles", [])
+    user_roles = [role.name for role in interaction.user.roles]
+    for banned in banned_roles:
+        if banned in user_roles:
+            await interaction.response.send_message(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
+            return
+
+    await interaction.response.send_message(f"🚀 Giveaway lancé pour **{prize}** !", ephemeral=True)
+    
+    embed = discord.Embed(
+        title="🎉 GIVEAWAY 🎉",
+        description=f"Lot à gagner : **{prize}**\n\nClique sur le bouton ci-dessous pour participer !\n⏱️ Durée : **{duration} minute(s)**",
+        color=discord.Color.blue()
+    )
+    
+    view = GiveawayView(db_data, prize)
+    message = await interaction.channel.send(embed=embed, view=view)
+    
+    bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, prize, duration * 60, view, message))
 
 
 @bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
@@ -363,7 +452,6 @@ async def remove_money(interaction: discord.Interaction, member: discord.Member,
     if user_id not in user_balances:
         user_balances[user_id] = {"wallet": 200, "bank": 0}
 
-    # Empêche le portefeuille de passer en négatif
     if user_balances[user_id]["wallet"] < amount:
         user_balances[user_id]["wallet"] = 0
     else:
@@ -394,7 +482,7 @@ async def set_level(interaction: discord.Interaction, member: discord.Member, le
         user_levels[user_id] = {"xp": 0, "level": 1}
 
     user_levels[user_id]["level"] = level_num
-    user_levels[user_id]["xp"] = 0  # Remet l'XP à 0 pour repartir sur de bonnes bases
+    user_levels[user_id]["xp"] = 0
 
     embed = discord.Embed(
         title="📊 Gestion des Niveaux",
@@ -405,30 +493,6 @@ async def set_level(interaction: discord.Interaction, member: discord.Member, le
 
 # ── BOUCLE D'ENVOI AUTOMATIQUE DES RAPPELS ──────────────────────────────────
 
-@tasks.loop(minutes=1)
-async def check_and_send_reminders():
-    if not reminders_db:
-        return
-    
-    # On utilise une vérification par minute. Pour gérer des intervalles précis, 
-    # on s'appuie sur le compteur de temps ou on simplifie en vérifiant si le temps s'est écoulé.
-    # Alternative plus robuste : exécuter une boucle globale ou stocker les objets tasks.
-    pass
-
-# Alternative avec une boucle dynamique par rappel ou vérification simple :
-@bot.event
-async def on_ready():
-    print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synchronisé {len(synced)} commandes slash.")
-    except Exception as e:
-        print(e)
-    
-    # Lancement de la tâche de fond des rappels si elle n'est pas déjà lancée
-    if not background_reminder_task.is_running():
-        background_reminder_task.start()
-
 @tasks.loop(seconds=60)
 async def background_reminder_task():
     for r_id, data in list(reminders_db.items()):
@@ -436,7 +500,6 @@ async def background_reminder_task():
         if not channel:
             continue
         
-        # Recherche du rôle dans toutes les guildes où le bot est présent
         target_role = None
         for guild in bot.guilds:
             role = discord.utils.get(guild.roles, name=data["role_name"])
@@ -456,9 +519,6 @@ async def background_reminder_task():
         except Exception:
             pass
 
-# N'oublie pas de gérer le timing exact des intervalles si besoin, 
-# cette boucle envoie ici un signal de test toutes les X minutes selon la logique de ton choix.
-
 # ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
 
 @bot.event
@@ -469,6 +529,9 @@ async def on_ready():
         print(f"Synchronisé {len(synced)} commandes slash.")
     except Exception as e:
         print(e)
+    
+    if not background_reminder_task.is_running():
+        background_reminder_task.start()
 
 @bot.event
 async def on_message(message: discord.Message):
