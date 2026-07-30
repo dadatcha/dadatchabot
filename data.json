@@ -20,12 +20,6 @@
     },
     "banned_roles": [],
     "reminders": {
-        "1": {
-            "title": "time to drink water my dearest members. im doing this reminder cuz i take care of you and im thinking about your healty <3 water4ever",
-            "channel_id": 1518745569705721948,
-            "role_name": "time to drink water",
-            "interval_minutes": 90
-        },
         "2": {
             "title": "time to drink water my dearest members. im doing this reminder cuz i take care of you and im thinking about your healty <3 water4ever",
             "channel_id": 1518745569705721948,
