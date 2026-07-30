@@ -75,7 +75,7 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── SYSTÈME DE GIVEAWAY PROPRE & SANS BUG ──────────────────────────────────────
+# ── 3. SYSTÈME DE GIVEAWAY CORRIGÉ & ROBUSTE ────────────────────────────────────
 
 class GiveawayParticipationView(discord.ui.View):
     def __init__(self, db_data, prize, prize_type):
@@ -111,7 +111,10 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
             description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
             color=discord.Color.red()
         )
-        await message.edit(embed=embed, view=None)
+        try:
+            await message.edit(embed=embed, view=None)
+        except Exception:
+            pass
         await channel.send(f"Le giveaway pour **{prize}** est annulé par manque de participants.")
         return
 
@@ -141,7 +144,10 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
         description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
         color=discord.Color.gold()
     )
-    await message.edit(embed=embed, view=None)
+    try:
+        await message.edit(embed=embed, view=None)
+    except Exception:
+        pass
     await channel.send(f"🎊 Félicitations <@{winner_id}> ! Tu remportes **{prize}** !")
 
 
@@ -181,7 +187,10 @@ class GiveawayPanel(discord.ui.View):
         embed.add_field(name="⏱️ Durée", value=f"`{self.duration} minute(s)`", inline=True)
         embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
 
-        await interaction.response.edit_message(embed=embed, view=self)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="✏️ Modifier Lot & Durée", style=discord.ButtonStyle.primary, row=0)
     async def edit_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -219,13 +228,16 @@ class GiveawayPanel(discord.ui.View):
 
         view = GiveawayParticipationView(db_data, self.prize, self.prize_type)
         
-        await interaction.message.delete()
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+
         message = await interaction.channel.send(embed=embed, view=view)
-        
         bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message))
 
 
-# ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
+# ── 4. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
 
 async def handle_leveling(message: discord.Message):
     if message.author.bot:
@@ -251,7 +263,7 @@ async def handle_leveling(message: discord.Message):
         )
 
 
-# ── 4. COMMANDES SLASH ────────────────────────────────────────────────────────
+# ── 5. TOUTES LES COMMANDES SLASH DU BOT ──────────────────────────────────────
 
 @bot.tree.command(name="startguess", description="Lance une partie de Guess the Number dans le salon")
 @app_commands.describe(min_num="Nombre minimum", max_num="Nombre maximum")
@@ -356,7 +368,220 @@ async def level(interaction: discord.Interaction, member: discord.Member = None)
     await interaction.response.send_message(embed=embed)
 
 
-# ── TÂCHES DE FOND & ÉVÉNEMENTS ──────────────────────────────────────────────
+@bot.tree.command(name="higherlower", description="Parie des coins sur un jeu de Higher/Lower")
+@app_commands.describe(bet="Montant de ta mise", choice="Choisis 'higher' (plus haut) ou 'lower' (plus bas)")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Plus haut (Higher)", value="higher"),
+    app_commands.Choice(name="Plus bas (Lower)", value="lower")
+])
+async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
+    user_id = interaction.user.id
+
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    user_balances[user_id]["wallet"] -= bet
+
+    base_number = random.randint(1, 50)
+    secret_number = random.randint(1, 100)
+
+    won = False
+    if choice == "higher" and secret_number > base_number:
+        won = True
+    elif choice == "lower" and secret_number < base_number:
+        won = True
+
+    embed = discord.Embed(title="🎲 Higher / Lower", color=discord.Color.orange())
+    embed.add_field(name="Nombre de base", value=f"**{base_number}**", inline=True)
+    embed.add_field(name="Ton choix", value=f"**{choice.upper()}**", inline=True)
+    embed.add_field(name="Nombre mystère", value=f"**{secret_number}**", inline=False)
+
+    if won:
+        winnings = bet * 2
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 Gagné ! Tu remportes **{winnings}** coins !"
+        embed.color = discord.Color.green()
+    else:
+        embed.description = f"😢 Perdu ! Tu as perdu ta mise de **{bet}** coins."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="roulette", description="Parie des coins à la roulette (red, black ou green)")
+@app_commands.describe(bet="Montant de ta mise", choice="Choisis red, black ou green")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Rouge (x2)", value="red"),
+    app_commands.Choice(name="Noir (x2)", value="black"),
+    app_commands.Choice(name="Vert / Zéro (x14)", value="green")
+])
+async def roulette(interaction: discord.Interaction, bet: int, choice: str):
+    user_id = interaction.user.id
+
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    user_balances[user_id]["wallet"] -= bet
+    roll = random.choices(["red", "black", "green"], weights=[45, 45, 10])[0]
+
+    embed = discord.Embed(title="🎰 Roulette Casino", color=discord.Color.dark_embed())
+    embed.add_field(name="Ta mise", value=f"**{bet}** coins sur **{choice.upper()}**", inline=False)
+    embed.add_field(name="Résultat de la roue", value=f"**{roll.upper()}**", inline=False)
+
+    if roll == choice:
+        multiplier = 14 if roll == "green" else 2
+        winnings = bet * multiplier
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 Jackpot ! C'est tombé sur **{roll.upper()}**. Tu gagnes **{winnings}** coins !"
+        embed.color = discord.Color.green()
+    else:
+        embed.description = f"😢 Perdu ! C'est tombé sur **{roll.upper()}**. Tu perds ta mise."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="casino", description="Joue à la machine à sous (Slot Machine)")
+@app_commands.describe(bet="Montant de ta mise")
+async def casino(interaction: discord.Interaction, bet: int):
+    user_id = interaction.user.id
+
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    user_balances[user_id]["wallet"] -= bet
+    symbols = ["🍒", "🍋", "🍊", "🔔", "⭐", "💎"]
+    weights = [35, 30, 20, 10, 4, 1]
+    result = random.choices(symbols, weights=weights, k=3)
+
+    embed = discord.Embed(title="🎰 Machine à Sous", color=discord.Color.blue())
+    embed.add_field(name="Tirage", value=f"| {result[0]} | {result[1]} | {result[2]} |", inline=False)
+
+    if result[0] == result[1] == result[2]:
+        multiplier_dict = {"🍒": 5, "🍋": 10, "🍊": 15, "🔔": 25, "⭐": 50, "💎": 100}
+        mult = multiplier_dict.get(result[0], 5)
+        winnings = bet * mult
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 TRIPLÉ ! 3 symboles **{result[0]}** ! Tu remportes **{winnings}** coins (x{mult}) !"
+        embed.color = discord.Color.green()
+    elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
+        winnings = int(bet * 1.5)
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"✨ Pas mal ! 2 symboles identiques. Tu récupères **{winnings}** coins."
+        embed.color = discord.Color.gold()
+    else:
+        embed.description = f"😢 Rien du tout ! Tu perds ta mise de **{bet}** coins."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="addmoney", description="[ADMIN] Ajoute des coins à l'argent d'un membre")
+@app_commands.describe(member="Le membre ciblé", amount="Le montant à ajouter")
+async def add_money(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    user_balances[user_id]["wallet"] += amount
+
+    embed = discord.Embed(
+        title="💰 Gestion de l'argent (Ajout)",
+        description=f"✅ **{amount}** coins ont été ajoutés au portefeuille de {member.mention}.\n"
+                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="removemoney", description="[ADMIN] Retire des coins à l'argent d'un membre")
+@app_commands.describe(member="Le membre ciblé", amount="Le montant à retirer")
+async def remove_money(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if user_balances[user_id]["wallet"] < amount:
+        user_balances[user_id]["wallet"] = 0
+    else:
+        user_balances[user_id]["wallet"] -= amount
+
+    embed = discord.Embed(
+        title="💰 Gestion de l'argent (Retrait)",
+        description=f"⚠️ **{amount}** coins ont été retirés du portefeuille de {member.mention}.\n"
+                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="setlevel", description="[ADMIN] Modifie directement le niveau d'un membre")
+@app_commands.describe(member="Le membre ciblé", level_num="Le nouveau niveau")
+async def set_level(interaction: discord.Interaction, member: discord.Member, level_num: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if level_num < 1:
+        await interaction.response.send_message("❌ Le niveau minimum est 1.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_levels:
+        user_levels[user_id] = {"xp": 0, "level": 1}
+
+    user_levels[user_id]["level"] = level_num
+    user_levels[user_id]["xp"] = 0
+
+    embed = discord.Embed(
+        title="📊 Gestion des Niveaux",
+        description=f"✅ Le niveau de {member.mention} a été défini à **{level_num}** (XP réinitialisée à 0).",
+        color=discord.Color.purple()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ── 6. TÂCHES DE FOND & ÉVÉNEMENTS ──────────────────────────────────────────────
 
 @tasks.loop(seconds=60)
 async def background_reminder_task():
@@ -400,7 +625,7 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-# ── LANCEMENT GLOBAL ──────────────────────────────────────────────────────
+# ── 7. LANCEMENT GLOBAL ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     dashboard_thread = threading.Thread(target=run_dashboard)
