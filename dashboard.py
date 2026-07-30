@@ -37,8 +37,9 @@ def save_permissions(perms):
     try:
         with open(PERMS_FILE, "w", encoding="utf-8") as f:
             json.dump(perms, f, indent=4, ensure_ascii=False)
+        print("[DEBUG] Permissions sauvegardées avec succès dans", os.path.abspath(PERMS_FILE))
     except Exception as e:
-        print(f"Erreur lors de la sauvegarde des permissions : {e}")
+        print(f"[ERREUR CRITIQUE] Impossible de sauvegarder les permissions : {e}")
 
 command_permissions = load_permissions()
 
@@ -57,10 +58,13 @@ def load_reminders():
 
 def save_reminders(reminders):
     try:
+        # Convertit explicitement les clés en string pour le format JSON
+        data_to_save = {str(k): v for k, v in reminders.items()}
         with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(reminders, f, indent=4, ensure_ascii=False)
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        print("[DEBUG] Rappels sauvegardés avec succès dans", os.path.abspath(REMINDERS_FILE))
     except Exception as e:
-        print(f"Erreur lors de la sauvegarde des rappels : {e}")
+        print(f"[ERREUR CRITIQUE] Impossible de sauvegarder les rappels : {e}")
 
 reminders_db = load_reminders()
 
