@@ -1,11 +1,17 @@
 import os
 import json
+import base64
+import urllib.request
+import urllib.error
 import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-DATA_FILE = "data.json"
+# Configuration GitHub & Render
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+REPO_NAME = "dadatcha/dadatchabot"  # Ton dépôt GitHub
+FILE_PATH = "data.json"            # Le fichier où tout sera sauvegardé
 
 default_data = {
     "permissions": {
@@ -23,22 +29,67 @@ default_data = {
     "reminders": {}
 }
 
+# --- CHARGEMENT ET SAUVEGARDE VIA GITHUB ---
 def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return default_data
+    if not GITHUB_TOKEN:
+        print("[INFO] GITHUB_TOKEN manquant, utilisation des données par défaut.")
+        return default_data
+    try:
+        url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        })
+        with urllib.request.urlopen(req) as response:
+            res_json = json.loads(response.read().decode())
+            file_content = base64.b64decode(res_json["content"]).decode("utf-8")
+            print("[SUCCES] Données chargées depuis GitHub !")
+            return json.loads(file_content)
+    except Exception as e:
+        print(f"[INFO] Fichier data.json non trouvé sur GitHub ou erreur ({e}), création initiale...")
+        return default_data
 
 def save_data(data):
+    if not GITHUB_TOKEN:
+        print("[ERREUR] Impossible de sauvegarder : GITHUB_TOKEN manquant.")
+        return
     try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-        print("[SUCCES] Données sauvegardées localement dans data.json")
+        url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
+        
+        # 1. Récupérer le SHA actuel du fichier (obligatoire pour modifier un fichier existant sur GitHub)
+        sha = None
+        try:
+            req_get = urllib.request.Request(url, headers={
+                "Authorization": f"token {GITHUB_TOKEN}",
+                "Accept": "application/vnd.github.v3+json"
+            })
+            with urllib.request.urlopen(req_get) as resp:
+                sha = json.loads(resp.read().decode()).get("sha")
+        except Exception:
+            pass  # Le fichier n'existe pas encore, ce n'est pas grave
+
+        # 2. Préparer le contenu encodé en Base64
+        json_str = json.dumps(data, indent=4, ensure_ascii=False)
+        content_encoded = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
+
+        # 3. Envoyer la mise à jour sur GitHub
+        payload = {
+            "message": "Mise à jour automatique des données du dashboard",
+            "content": content_encoded
+        }
+        if sha:
+            payload["sha"] = sha
+
+        req_put = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github.v3+json"
+        }, method="PUT")
+
+        with urllib.request.urlopen(req_put) as response:
+            print("[SUCCES] Données sauvegardées et commitées sur GitHub avec succès !")
     except Exception as e:
-        print(f"[ERREUR] Impossible de sauvegarder : {e}")
+        print(f"[ERREUR] Échec de la sauvegarde sur GitHub : {e}")
 
 db = load_data()
 command_permissions = db.get("permissions", default_data["permissions"])
