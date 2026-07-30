@@ -161,9 +161,8 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
             if giveaway_role:
                 try:
                     await winner_member.add_roles(giveaway_role, reason=f"Victoire au giveaway temporaire : {prize}")
-                    reward_msg = f"\n⏱️ Le rôle temporaire {giveaway_role.mention} lui a été attribué pour 12 heures !"
+                    reward_msg = f"\n⏱️ Le rôle temporaire {giveaway_role.mention} lui a été attribué pour 24 heures !"
                     
-                    # Tâche de fond pour retirer le rôle après 12 heures (43200 secondes)
                     async def remove_temporary_role():
                         await asyncio.sleep(86400)
                         try:
@@ -217,7 +216,7 @@ class GiveawayPanel(discord.ui.View):
         self.prize_type = "Argent (Coins)"
         self.ping_role = None
         self.allowed_role = None
-        self.giveaway_role = None  # Rôle à gagner (permanent ou temporaire)
+        self.giveaway_role = None
 
     async def update_panel(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -244,7 +243,7 @@ class GiveawayPanel(discord.ui.View):
         options=[
             discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
             discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
-            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire (12h)"),
+            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire (24h)"),
             discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
             discord.SelectOption(label="Item / Autre", description="Autre type de lot")
         ]
@@ -310,7 +309,6 @@ class GiveawayPanel(discord.ui.View):
         
         content_to_send = self.ping_role.mention if self.ping_role else None
         
-        # Supprime le panneau de config et lance le message public
         await interaction.message.delete()
         message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
         
@@ -388,6 +386,9 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
 
 @bot.tree.command(name="giveaway", description="Ouvre le panneau de configuration du Giveaway")
 async def giveaway(interaction: discord.Interaction):
+    # Utilisation de defer pour éviter l'erreur "The application did not respond"
+    await interaction.response.defer(ephemeral=True)
+
     try:
         with open("data.json", "r", encoding="utf-8") as f:
             db_data = json.load(f)
@@ -399,14 +400,14 @@ async def giveaway(interaction: discord.Interaction):
     
     is_admin = interaction.user.guild_permissions.administrator
     if perm_setting == "admin" and not is_admin:
-        await interaction.response.send_message("❌ Cette commande est réservée aux administrateurs.", ephemeral=True)
+        await interaction.followup.send("❌ Cette commande est réservée aux administrateurs.", ephemeral=True)
         return
 
     banned_roles = db_data.get("banned_roles", [])
     user_roles = [role.name for role in interaction.user.roles]
     for banned in banned_roles:
         if banned in user_roles:
-            await interaction.response.send_message(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
+            await interaction.followup.send(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
             return
 
     panel_view = GiveawayPanel(interaction)
@@ -423,7 +424,7 @@ async def giveaway(interaction: discord.Interaction):
     embed.add_field(name="🛡️ Rôle requis", value="`Aucun`", inline=True)
     embed.add_field(name="👑 Rôle à gagner (Si rôle)", value="`Aucun`", inline=True)
 
-    await interaction.response.send_message(embed=embed, view=panel_view, ephemeral=True)
+    await interaction.followup.send(embed=embed, view=panel_view, ephemeral=True)
 
 
 @bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
