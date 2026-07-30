@@ -30,5 +30,8 @@
             "add_levels": 1,
             "add_money": 0
         }
-    }
+    },
+    "banned_roles": [
+        "scammer"
+    ]
 }
