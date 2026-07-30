@@ -1,13 +1,16 @@
 import os
 import json
+import urllib.request
 import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-# Fichiers de sauvegarde persistante
-PERMS_FILE = "permissions.json"
-REMINDERS_FILE = "reminders.json"
+# Configuration JSONBin.io
+JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "")
+# Identifiants des Bins (laissés vides au départ, ils seront créés automatiquement)
+PERMS_BIN_ID = os.environ.get("PERMS_BIN_ID", "")
+REMINDERS_BIN_ID = os.environ.get("REMINDERS_BIN_ID", "")
 
 # Dictionnaire par défaut des permissions
 default_permissions = {
@@ -23,52 +26,42 @@ default_permissions = {
     "reminders": "everyone"
 }
 
-# --- CHARGEMENT ET SAUVEGARDE DES PERMISSIONS ---
-def load_permissions():
-    if os.path.exists(PERMS_FILE):
-        try:
-            with open(PERMS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return default_permissions.copy()
-
-def save_permissions(perms):
+# --- FONCTIONS JSONBIN ---
+def jsonbin_get(bin_id, default_data):
+    if not bin_id or not JSONBIN_API_KEY:
+        return default_data
     try:
-        with open(PERMS_FILE, "w", encoding="utf-8") as f:
-            json.dump(perms, f, indent=4, ensure_ascii=False)
-        print("[DEBUG] Permissions sauvegardées avec succès dans", os.path.abspath(PERMS_FILE))
+        url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
+        req = urllib.request.Request(url, headers={"X-Master-Key": JSONBIN_API_KEY})
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            return data.get("record", default_data)
     except Exception as e:
-        print(f"[ERREUR CRITIQUE] Impossible de sauvegarder les permissions : {e}")
+        print(f"[ERREUR JSONBin GET] : {e}")
+        return default_data
 
-command_permissions = load_permissions()
-
-
-# --- CHARGEMENT ET SAUVEGARDE DES RAPPELS ---
-def load_reminders():
-    if os.path.exists(REMINDERS_FILE):
-        try:
-            with open(REMINDERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # Convertit les clés stockées en string de nouveau en int
-                return {int(k): v for k, v in data.items()}
-        except Exception:
-            pass
-    return {}
-
-def save_reminders(reminders):
+def jsonbin_save(bin_id, data):
+    if not bin_id or not JSONBIN_API_KEY:
+        return
     try:
-        # Convertit explicitement les clés en string pour le format JSON
-        data_to_save = {str(k): v for k, v in reminders.items()}
-        with open(REMINDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
-        print("[DEBUG] Rappels sauvegardés avec succès dans", os.path.abspath(REMINDERS_FILE))
+        url = f"https://api.jsonbin.io/v3/b/{bin_id}"
+        payload = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={
+            "Content-Type": "application/json",
+            "X-Master-Key": JSONBIN_API_KEY
+        }, method="PUT")
+        with urllib.request.urlopen(req) as response:
+            print("[DEBUG] Sauvegarde JSONBin réussie")
     except Exception as e:
-        print(f"[ERREUR CRITIQUE] Impossible de sauvegarder les rappels : {e}")
+        print(f"[ERREUR JSONBin SAVE] : {e}")
 
-reminders_db = load_reminders()
+# --- CHARGEMENT DES DONNÉES ---
+command_permissions = jsonbin_get(PERMS_BIN_ID, default_permissions.copy())
 
-# Gestion de l'ID incrémentiel des rappels
+raw_reminders = jsonbin_get(REMINDERS_BIN_ID, {})
+# Convertit les clés en int (car JSON convertit tout en string)
+reminders_db = {int(k): v for k, v in raw_reminders.items()}
+
 if reminders_db:
     reminder_counter = max(reminders_db.keys()) + 1
 else:
@@ -186,7 +179,7 @@ def index():
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
         command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
-        save_permissions(command_permissions)  # Sauvegarde persistante
+        jsonbin_save(PERMS_BIN_ID, command_permissions)
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
@@ -206,7 +199,9 @@ def add_reminder():
                 "interval_minutes": int(interval)
             }
             reminder_counter += 1
-            save_reminders(reminders_db)  # Sauvegarde persistante
+            # Sauvegarde JSONBin (convertit les clés int en str pour le JSON)
+            data_to_save = {str(k): v for k, v in reminders_db.items()}
+            jsonbin_save(REMINDERS_BIN_ID, data_to_save)
         except ValueError:
             pass
     return redirect(url_for("index"))
@@ -215,7 +210,8 @@ def add_reminder():
 def delete_reminder(r_id):
     if r_id in reminders_db:
         del reminders_db[r_id]
-        save_reminders(reminders_db)  # Sauvegarde persistante
+        data_to_save = {str(k): v for k, v in reminders_db.items()}
+        jsonbin_save(REMINDERS_BIN_ID, data_to_save)
     return redirect(url_for("index"))
 
 @app.route("/sync/discord", methods=["POST"])
@@ -256,7 +252,6 @@ def sync_render():
     global sync_status
     webhook = os.environ.get("RENDER_DEPLOY_HOOK_URL")
     if webhook:
-        import urllib.request
         try:
             urllib.request.urlopen(webhook, data=b"")
             sync_status = "Redéploiement Render déclenché !"
