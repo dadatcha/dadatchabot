@@ -14,10 +14,14 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ── DICTIONNAIRES DE STOCKAGE (EN MÉMOIRE) ────────────────────────────────────
+# Pour un vrai projet persistant, tu pourras les lier à une base de données (SQLite/MongoDB)
+active_guesses = {}
+user_balances = {}  # user_id -> {"wallet": int, "bank": int}
+user_levels = {}    # user_id -> {"xp": int, "level": int}
+
 
 # ── 2. LOGIQUE DU JEU "GUESS THE NUMBER" ───────────────────────────────────────
-
-active_guesses = {}
 
 class GuessGameView:
     @staticmethod
@@ -34,7 +38,7 @@ class GuessGameView:
         try:
             guess = int(message.content.strip())
         except ValueError:
-            return  # Ce n'est pas un nombre, on ignore
+            return
 
         game["participants"].add(message.author.id)
         game["attempts"] += 1
@@ -67,7 +71,36 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── 3. COMMANDES SLASH ────────────────────────────────────────────────────────
+# ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
+
+async def handle_leveling(message: discord.Message):
+    if message.author.bot:
+        return
+
+    user_id = message.author.id
+    if user_id not in user_levels:
+        user_levels[user_id] = {"xp": 0, "level": 1}
+
+    # Gain aléatoire d'XP par message (entre 15 et 25)
+    xp_gain = random.randint(15, 25)
+    user_levels[user_id]["xp"] += xp_gain
+
+    current_data = user_levels[user_id]
+    current_level = current_data["level"]
+    current_xp = current_data["xp"]
+
+    # Seuil d'XP nécessaire pour passer au niveau supérieur (ex: niveau * 100)
+    xp_needed = current_level * 100
+
+    if current_xp >= xp_needed:
+        current_data["level"] += 1
+        current_data["xp"] = 0  # Remet l'XP à 0 ou conserve le surplus
+        await message.channel.send(
+            f"🎉 Félicitations {message.author.mention} ! Tu passes au niveau **{current_data['level']}** !"
+        )
+
+
+# ── 4. COMMANDES SLASH (JEUX & ÉCONOMIE & NIVEAUX) ───────────────────────────
 
 @bot.tree.command(name="startguess", description="Lance une partie de Guess the Number dans le salon")
 @app_commands.describe(min_num="Nombre minimum", max_num="Nombre maximum")
@@ -110,7 +143,47 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
     await interaction.response.send_message(embed=embed)
 
 
-# ── 4. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
+@bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
+@app_commands.describe(member="Le membre à consulter")
+async def balance(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    user_id = target.id
+
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}  # 200 pièces offertes au départ
+
+    bal = user_balances[user_id]
+    embed = discord.Embed(
+        title=f"💰 Portefeuille de {target.display_name}",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Portefeuille", value=f"**{bal['wallet']}** coins", inline=True)
+    embed.add_field(name="Banque", value=f"**{bal['bank']}** coins", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="level", description="Vérifie ton niveau actuel ou celui d'un membre")
+@app_commands.describe(member="Le membre à consulter")
+async def level(interaction: discord.Interaction, member: discord.Member = None):
+    target = member or interaction.user
+    user_id = target.id
+
+    if user_id not in user_levels:
+        user_levels[user_id] = {"xp": 0, "level": 1}
+
+    lvl_data = user_levels[user_id]
+    xp_needed = lvl_data["level"] * 100
+
+    embed = discord.Embed(
+        title=f"📊 Niveau de {target.display_name}",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="Niveau", value=f"**{lvl_data['level']}**", inline=True)
+    embed.add_field(name="XP", value=f"**{lvl_data['xp']} / {xp_needed}**", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+# ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
@@ -123,13 +196,17 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Traite le jeu Guess the Number en temps réel
+    # 1. Traite le jeu Guess the Number
     await GuessGameView.handle_guess_message(message)
+    
+    # 2. Traite l'attribution d'XP pour les niveaux
+    await handle_leveling(message)
+    
     # Laisse passer les autres commandes
     await bot.process_commands(message)
 
 
-# ── 5. LANCEMENT ──────────────────────────────────────────────────────────────
+# ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     bot.run(os.environ.get("DISCORD_TOKEN"))
