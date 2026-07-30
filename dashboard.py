@@ -11,7 +11,7 @@ app = Flask(__name__)
 # Configuration GitHub & Render
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 REPO_NAME = "dadatcha/dadatchabot"  # Ton dépôt GitHub
-FILE_PATH = "data.json"            # Le fichier où tout sera sauvegardé
+FILE_PATH = "data.json"            # Fichier de stockage persistant
 
 default_data = {
     "permissions": {
@@ -26,7 +26,12 @@ default_data = {
         "setlevel": "admin",
         "reminders": "everyone"
     },
-    "reminders": {}
+    "reminders": {},
+    "level_config": {
+        "xp_multiplier": 1.0,
+        "money_per_level": 100
+    },
+    "custom_commands": {}
 }
 
 # --- CHARGEMENT ET SAUVEGARDE VIA GITHUB ---
@@ -55,8 +60,6 @@ def save_data(data):
         return
     try:
         url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
-        
-        # 1. Récupérer le SHA actuel du fichier (obligatoire pour modifier un fichier existant sur GitHub)
         sha = None
         try:
             req_get = urllib.request.Request(url, headers={
@@ -66,15 +69,13 @@ def save_data(data):
             with urllib.request.urlopen(req_get) as resp:
                 sha = json.loads(resp.read().decode()).get("sha")
         except Exception:
-            pass  # Le fichier n'existe pas encore, ce n'est pas grave
+            pass
 
-        # 2. Préparer le contenu encodé en Base64
         json_str = json.dumps(data, indent=4, ensure_ascii=False)
         content_encoded = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
 
-        # 3. Envoyer la mise à jour sur GitHub
         payload = {
-            "message": "Mise à jour automatique des données du dashboard",
+            "message": "Mise à jour des configurations du dashboard",
             "content": content_encoded
         }
         if sha:
@@ -95,6 +96,8 @@ db = load_data()
 command_permissions = db.get("permissions", default_data["permissions"])
 raw_reminders = db.get("reminders", {})
 reminders_db = {int(k): v for k, v in raw_reminders.items() if str(k).isdigit()}
+level_config = db.get("level_config", default_data["level_config"])
+custom_commands = db.get("custom_commands", {})
 
 if reminders_db:
     reminder_counter = max(reminders_db.keys()) + 1
@@ -128,6 +131,7 @@ DASHBOARD_TEMPLATE = """
         .btn:hover { opacity: 0.9; }
         form.inline-form { display: inline; }
         .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+        .form-grid-2 { margin-top: 15px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 10px; }
         input, select { padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
         .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
         .alert { padding: 12px; border-radius: 6px; margin-bottom: 20px; background-color: #334155; color: #38bdf8; border: 1px solid #38bdf8; }
@@ -148,6 +152,55 @@ DASHBOARD_TEMPLATE = """
             <form action="/sync/render" method="POST"><button type="submit" class="btn btn-sync-render">🚀 Redéployer (Render)</button></form>
         </div>
         
+        <h2>📊 Fonctionnement des Niveaux (XP)</h2>
+        <form action="/levels/config" method="POST">
+            <div class="form-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+                <div>
+                    <label>Multiplicateur d'XP :</label>
+                    <input type="number" step="0.1" name="xp_multiplier" value="{{ level_config.xp_multiplier }}" required>
+                </div>
+                <div>
+                    <label>Argent gagné par niveau :</label>
+                    <input type="number" name="money_per_level" value="{{ level_config.money_per_level }}" required>
+                </div>
+                <div style="display: flex; align-items: flex-end;">
+                    <button type="submit" class="btn btn-add" style="margin-top:0;">💾 Sauvegarder les Niveaux</button>
+                </div>
+            </div>
+        </form>
+
+        <h2>🎁 Commandes Personnalisées de Récompense</h2>
+        <table>
+            <tr><th>Nom de la commande</th><th>Rôle attribué</th><th>XP ajouté</th><th>Argent ajouté</th><th>Action</th></tr>
+            {% if custom_commands %}
+                {% for cmd_name, cmd_data in custom_commands.items() %}
+                <tr>
+                    <td><strong>/{{ cmd_name }}</strong></td>
+                    <td>@{{ cmd_data.role_name if cmd_data.role_name else 'Aucun' }}</td>
+                    <td>+{{ cmd_data.add_xp }} XP</td>
+                    <td>+{{ cmd_data.add_money }} 🪙</td>
+                    <td>
+                        <form action="/custom-command/delete/{{ cmd_name }}" method="POST" class="inline-form">
+                            <button type="submit" class="btn btn-delete">Supprimer</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="5" style="text-align: center; color: #94a3b8;">Aucune commande personnalisée créée.</td></tr>
+            {% endif %}
+        </table>
+
+        <form action="/custom-command/add" method="POST">
+            <div class="form-grid-2">
+                <input type="text" name="cmd_name" placeholder="Nom de la commande (ex: bonus)" required>
+                <input type="text" name="role_name" placeholder="Rôle à donner (optionnel)">
+                <input type="number" name="add_xp" placeholder="XP à ajouter" value="0" required>
+                <input type="number" name="add_money" placeholder="Argent à ajouter" value="0" required>
+                <button type="submit" class="btn btn-add" style="margin-top:0;">➕ Créer</button>
+            </div>
+        </form>
+
         <h2>🛡️ Gestion des Permissions des Commandes</h2>
         <table>
             <tr><th>Commande</th><th>Permission Actuelle</th><th>Action / Bascule</th></tr>
@@ -207,7 +260,57 @@ def index():
     global sync_status
     msg = sync_status
     sync_status = None
-    return render_template_string(DASHBOARD_TEMPLATE, permissions=command_permissions, reminders=reminders_db, message=msg)
+    return render_template_string(
+        DASHBOARD_TEMPLATE, 
+        permissions=command_permissions, 
+        reminders=reminders_db, 
+        level_config=level_config,
+        custom_commands=custom_commands,
+        message=msg
+    )
+
+@app.route("/levels/config", methods=["POST"])
+def update_levels_config():
+    global level_config
+    try:
+        xp_mult = float(request.form.get("xp_multiplier", 1.0))
+        money_lvl = int(request.form.get("money_per_level", 100))
+        level_config["xp_multiplier"] = xp_mult
+        level_config["money_per_level"] = money_lvl
+        db["level_config"] = level_config
+        save_data(db)
+    except ValueError:
+        pass
+    return redirect(url_for("index"))
+
+@app.route("/custom-command/add", methods=["POST"])
+def add_custom_command():
+    global custom_commands
+    cmd_name = request.form.get("cmd_name", "").strip().lower().lstrip("/")
+    role_name = request.form.get("role_name", "").strip().lstrip("@")
+    try:
+        add_xp = int(request.form.get("add_xp", 0))
+        add_money = int(request.form.get("add_money", 0))
+        
+        if cmd_name:
+            custom_commands[cmd_name] = {
+                "role_name": role_name,
+                "add_xp": add_xp,
+                "add_money": add_money
+            }
+            db["custom_commands"] = custom_commands
+            save_data(db)
+    except ValueError:
+        pass
+    return redirect(url_for("index"))
+
+@app.route("/custom-command/delete/<cmd_name>", methods=["POST"])
+def delete_custom_command(cmd_name):
+    if cmd_name in custom_commands:
+        del custom_commands[cmd_name]
+        db["custom_commands"] = custom_commands
+        save_data(db)
+    return redirect(url_for("index"))
 
 @app.route("/toggle/<cmd_name>", methods=["POST"])
 def toggle_permission(cmd_name):
