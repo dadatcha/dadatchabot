@@ -298,7 +298,53 @@ async def roulette(interaction: discord.Interaction, bet: int, choice: str):
         embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
+@bot.tree.command(name="casino", description="Joue à la machine à sous (Slot Machine)")
+@app_commands.describe(bet="Montant de ta mise")
+async def casino(interaction: discord.Interaction, bet: int):
+    user_id = interaction.user.id
 
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    user_balances[user_id]["wallet"] -= bet
+
+    # Symboles de la machine à sous
+    symbols = ["🍒", "🍋", "🍊", "🔔", "⭐", "💎"]
+    weights = [35, 30, 20, 10, 4, 1]  # Plus le symbole est rare, plus il rapporte
+
+    result = random.choices(symbols, weights=weights, k=3)
+
+    embed = discord.Embed(title="🎰 Machine à Sous", color=discord.Color.blue())
+    embed.add_field(name="Tirage", value=f"| {result[0]} | {result[1]} | {result[2]} |", inline=False)
+
+    # Calcul des gains
+    if result[0] == result[1] == result[2]:
+        # 3 symboles identiques (gros gain selon le symbole)
+        multiplier_dict = {"🍒": 5, "🍋": 10, "🍊": 15, "🔔": 25, "⭐": 50, "💎": 100}
+        mult = multiplier_dict.get(result[0], 5)
+        winnings = bet * mult
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 TRIPLÉ ! 3 symboles **{result[0]}** ! Tu remportes **{winnings}** coins (x{mult}) !"
+        embed.color = discord.Color.green()
+    elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
+        # 2 symboles identiques (petit remboursement)
+        winnings = int(bet * 1.5)
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"✨ Pas mal ! 2 symboles identiques. Tu récupères **{winnings}** coins."
+        embed.color = discord.Color.gold()
+    else:
+        embed.description = f"😢 Rien du tout ! Tu perds ta mise de **{bet}** coins."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
 # ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
