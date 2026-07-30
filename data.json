@@ -16,8 +16,7 @@
         "toggle": "admin",
         "sync": "admin",
         "custom_command": "admin",
-        "levels": "admin",
-        "vouch": "everyone"
+        "levels": "admin"
     },
     "banned_roles": [],
     "reminders": {},
@@ -26,11 +25,5 @@
         "xp_multiplier": 1.0,
         "money_per_level": 100
     },
-    "custom_commands": {
-        "vouch": {
-            "role_name": "",
-            "add_levels": 1,
-            "add_money": 0
-        }
-    }
+    "custom_commands": {}
 }
