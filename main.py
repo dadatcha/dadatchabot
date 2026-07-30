@@ -75,202 +75,6 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── SYSTÈME DE GIVEAWAY AVANCÉ & PANNEAU ──────────────────────────────────────
-
-class GiveawayParticipationView(discord.ui.View):
-    def __init__(self, db_data, prize, prize_type, allowed_roles):
-        super().__init__(timeout=None)
-        self.db_data = db_data
-        self.prize = prize
-        self.prize_type = prize_type
-        self.allowed_roles = allowed_roles
-        self.participants = set()
-
-    @discord.ui.button(label="🎉 Participer", style=discord.ButtonStyle.green, custom_id="giveaway_join")
-    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_role_names = [role.name for role in interaction.user.roles]
-        user_role_ids = [role.id for role in interaction.user.roles]
-
-        banned_roles = self.db_data.get("banned_roles", [])
-        for banned in banned_roles:
-            if banned in user_role_names:
-                await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer.", ephemeral=True)
-                return
-
-        if self.allowed_roles:
-            has_allowed_role = any(r in user_role_names or r in user_role_ids for r in self.allowed_roles)
-            if not has_allowed_role:
-                await interaction.response.send_message("❌ Tu ne possèdes pas l'un des rôles requis pour participer à ce giveaway.", ephemeral=True)
-                return
-
-        if interaction.user.id in self.participants:
-            await interaction.response.send_message("Tu participes déjà à ce giveaway !", ephemeral=True)
-        else:
-            self.participants.add(interaction.user.id)
-            await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
-
-
-async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds, view, message, giveaway_role):
-    await asyncio.sleep(duration_seconds)
-    
-    if not view.participants:
-        embed = discord.Embed(
-            title="🎉 Giveaway Terminé !", 
-            description=f"Type : **{prize_type.upper()}**\nLot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
-            color=discord.Color.red()
-        )
-        await message.edit(embed=embed, view=None)
-        await channel.send(f"Le giveaway pour **{prize}** est annulé par manque de participants.")
-        return
-
-    winner_id = random.choice(list(view.participants))
-    guild = channel.guild
-    winner_member = guild.get_member(winner_id)
-
-    reward_msg = ""
-    if winner_member:
-        if prize_type == "Argent (Coins)":
-            import re
-            numbers = re.findall(r'\d+', prize)
-            amount = int(numbers[0]) if numbers else 100
-            if winner_id not in user_balances:
-                user_balances[winner_id] = {"wallet": 200, "bank": 0}
-            user_balances[winner_id]["wallet"] += amount
-            reward_msg = f"\n💰 **{amount} coins** ont été ajoutés à son portefeuille !"
-            
-        elif prize_type == "Niveau / XP":
-            import re
-            numbers = re.findall(r'\d+', prize)
-            lvl_add = int(numbers[0]) if numbers else 1
-            if winner_id not in user_levels:
-                user_levels[winner_id] = {"xp": 0, "level": 1}
-            user_levels[winner_id]["level"] += lvl_add
-            reward_msg = f"\n📊 Son niveau a augmenté de +{lvl_add} !"
-
-        elif prize_type == "Rôle Permanent":
-            if giveaway_role:
-                try:
-                    await winner_member.add_roles(giveaway_role, reason=f"Victoire au giveaway : {prize}")
-                    reward_msg = f"\n👑 Le rôle permanent {giveaway_role.mention} lui a été attribué !"
-                except discord.Forbidden:
-                    reward_msg = f"\n⚠️ Je n'ai pas les permissions pour lui attribuer le rôle {giveaway_role.mention}."
-            else:
-                reward_msg = f"\n⚠️ Aucun rôle n'avait été sélectionné dans le panneau."
-
-        elif prize_type == "Rôle Temporaire":
-            if giveaway_role:
-                try:
-                    await winner_member.add_roles(giveaway_role, reason=f"Victoire au giveaway temporaire : {prize}")
-                    reward_msg = f"\n⏱️ Le rôle temporaire {giveaway_role.mention} lui a été attribué pour 24 heures !"
-                    
-                    async def remove_temporary_role():
-                        await asyncio.sleep(86400)
-                        try:
-                            await winner_member.remove_roles(giveaway_role, reason="Expiration du rôle temporaire de giveaway")
-                            await channel.send(f"⏳ Le rôle temporaire {giveaway_role.mention} a été retiré à {winner_member.mention}.")
-                        except Exception:
-                            pass
-                    
-                    bot.loop.create_task(remove_temporary_role())
-
-                except discord.Forbidden:
-                    reward_msg = f"\n⚠️ Je n'ai pas les permissions pour lui attribuer le rôle {giveaway_role.mention}."
-            else:
-                reward_msg = f"\n⚠️ Aucun rôle n'avait été sélectionné dans le panneau."
-
-    embed = discord.Embed(
-        title="🎉 Giveaway Terminé !", 
-        description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
-        color=discord.Color.gold()
-    )
-    await message.edit(embed=embed, view=None)
-    await channel.send(f"🎊 Félicitations <@{winner_id}> ! Tu remportes **{prize}** !")
-
-
-# Modal pour modifier le lot et la durée
-class GiveawayEditModal(discord.ui.Modal, title="Modifier le Lot et la Durée"):
-    prize_input = discord.ui.TextInput(label="Lot à gagner", placeholder="Ex: 500 Coins ou Rôle VIP", default="Nitro Classic")
-    duration_input = discord.ui.TextInput(label="Durée (en minutes)", placeholder="Ex: 5", default="5")
-
-    def __init__(self, panel_view):
-        super().__init__()
-        self.panel_view = panel_view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.panel_view.prize = self.prize_input.value
-        try:
-            self.panel_view.duration = int(self.duration_input.value)
-        except ValueError:
-            self.panel_view.duration = 5
-        
-        await self.panel_view.update_panel(interaction)
-
-
-# Panneau de configuration interactif simplifié (Sans RoleSelect bloquant)
-class GiveawayPanel(discord.ui.View):
-    def __init__(self, interaction: discord.Interaction):
-        super().__init__(timeout=180)
-        self.interaction = interaction
-        self.prize = "Nitro Classic"
-        self.duration = 5
-        self.prize_type = "Argent (Coins)"
-
-    async def update_panel(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="⚙️ Panneau de Configuration - Giveaway",
-            description="Personnalisez les paramètres de votre giveaway ci-dessous, puis cliquez sur **Lancer**.",
-            color=discord.Color.blurple()
-        )
-        embed.add_field(name="🎁 Lot", value=f"`{self.prize}`", inline=True)
-        embed.add_field(name="⏱️ Durée", value=f"`{self.duration} minute(s)`", inline=True)
-        embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
-
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="✏️ Modifier Lot & Durée", style=discord.ButtonStyle.primary, row=0)
-    async def edit_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(GiveawayEditModal(self))
-
-    @discord.ui.select(
-        placeholder="Choisir le type de prix...",
-        row=1,
-        options=[
-            discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
-            discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
-            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire (24h)"),
-            discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
-            discord.SelectOption(label="Item / Autre", description="Autre type de lot")
-        ]
-    )
-    async def select_prize_type(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.prize_type = select.values[0]
-        await self.update_panel(interaction)
-
-    @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=2)
-    async def launch_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            with open("data.json", "r", encoding="utf-8") as f:
-                db_data = json.load(f)
-        except FileNotFoundError:
-            db_data = {"permissions": {}, "banned_roles": []}
-
-        embed = discord.Embed(
-            title="🎉 GIBEAWAY 🎉",
-            description=f"🎁 **Lot :** {self.prize}\n"
-                        f"📌 **Type :** {self.prize_type}\n"
-                        f"⏱️ **Durée :** {self.duration} minute(s)\n\n"
-                        f"Clique sur le bouton **🎉 Participer** ci-dessous !",
-            color=discord.Color.blue()
-        )
-
-        view = GiveawayParticipationView(db_data, self.prize, self.prize_type, [])
-        
-        await interaction.message.delete()
-        message = await interaction.channel.send(embed=embed, view=view)
-        
-        bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message, None))
-
-
 # ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
 
 async def handle_leveling(message: discord.Message):
@@ -340,43 +144,10 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="giveaway", description="Ouvre le panneau de configuration du Giveaway")
+@bot.tree.command(name="giveaway", description="Test direct sans defer")
 async def giveaway(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        with open("data.json", "r", encoding="utf-8") as f:
-            db_data = json.load(f)
-    except FileNotFoundError:
-        db_data = {"permissions": {}, "banned_roles": []}
-
-    permissions = db_data.get("permissions", {})
-    perm_setting = permissions.get("giveaway", "admin")
-    
-    is_admin = interaction.user.guild_permissions.administrator
-    if perm_setting == "admin" and not is_admin:
-        await interaction.followup.send("❌ Cette commande est réservée aux administrateurs.", ephemeral=True)
-        return
-
-    banned_roles = db_data.get("banned_roles", [])
-    user_roles = [role.name for role in interaction.user.roles]
-    for banned in banned_roles:
-        if banned in user_roles:
-            await interaction.followup.send(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
-            return
-
-    panel_view = GiveawayPanel(interaction)
-    
-    embed = discord.Embed(
-        title="⚙️ Panneau de Configuration - Giveaway",
-        description="Personnalisez les paramètres de votre giveaway ci-dessous, puis cliquez sur **Lancer**.",
-        color=discord.Color.blurple()
-    )
-    embed.add_field(name="🎁 Lot", value="`Nitro Classic`", inline=True)
-    embed.add_field(name="⏱️ Durée", value="`5 minute(s)`", inline=True)
-    embed.add_field(name="📌 Type de prix", value="`Argent (Coins)`", inline=True)
-
-    await interaction.followup.send(embed=embed, view=panel_view, ephemeral=True)
+    # On répond immédiatement sans utiliser defer() pour voir si Discord reçoit quelque chose
+    await interaction.response.send_message("✅ Le bot répond enfin !", ephemeral=True)
 
 
 @bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
@@ -666,7 +437,7 @@ async def background_reminder_task():
         except Exception:
             pass
 
-# ── 5. ÉVÉNEMENTS DU BOT ────────────────────────────────______________________
+# ── 5. ÉVÉNEMENTS DU BOT ────────────────────────────────________________──────
 
 @bot.event
 async def on_ready():
