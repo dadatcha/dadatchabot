@@ -4,10 +4,33 @@ import discord
 import threading
 import json
 import asyncio
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 from discord import app_commands
 from discord.ext import commands, tasks
 from dashboard import run_dashboard
 from dashboard import reminders_db
+
+# ── CONFIGURATION DES LOGS ───────────────────────────────────────────────────
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("discord_bot")
+
+# ── FONCTIONS API FICTIVES (À adapter selon ton backend) ─────────────────────
+
+async def api_get_list(endpoint: str) -> list:
+    return []
+
+async def api_get_json(endpoint: str) -> Optional[dict]:
+    return None
+
+async def api_post(endpoint: str, data: dict) -> None:
+    pass
+
+async def api_patch(endpoint: str, data: dict) -> None:
+    pass
+
 
 # ── 1. CONFIGURATION DES INTENTS & DU BOT ──────────────────────────────────────
 
@@ -21,7 +44,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── DICTIONNAIRES DE STOCKAGE (EN MÉMOIRE) ────────────────────────────────────
 active_guesses = {}
-user_balances = {}  # user_id -> {"wallet": int, "bank": int}
+user_balances = {}   # user_id -> {"wallet": int, "bank": int}
 user_levels = {}    # user_id -> {"xp": int, "level": int}
 
 
@@ -75,24 +98,287 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── 3. SYSTÈME DE GIVEAWAY CORRIGÉ & ROBUSTE ────────────────────────────────────
+# ── SYSTÈME DE GIVEAWAY & RÔLES TEMPORAIRES AVANCÉS ──────────────────────────
 
+GIVEAWAY_EMOJI = "🎉"
+
+def _parse_duration(s: str) -> Optional[int]:
+    """Parse '7j'/'7d', '24h', '30m', ou un nombre brut en minutes."""
+    s = s.strip().lower()
+    if not s:
+        return None
+    if s.endswith("j") or s.endswith("d"):
+        return int(s[:-1]) * 1440
+    if s.endswith("h"):
+        return int(s[:-1]) * 60
+    if s.endswith("m"):
+        return int(s[:-1])
+    return int(s)
+
+
+def _fmt_duration(minutes: int) -> str:
+    """Formate un nombre de minutes en chaîne lisible."""
+    if minutes < 60:
+        return f"{minutes} min"
+    if minutes < 1440:
+        h, m = divmod(minutes, 60)
+        return f"{h}h{m:02d}" if m else f"{h}h"
+    d = minutes // 1440
+    return f"{d} jour{'s' if d > 1 else ''}"
+
+
+async def _filter_eligible(
+    users: list[discord.User],
+    guild: Optional[discord.Guild],
+    giveaway: dict,
+) -> list[discord.User]:
+    """Retourne les utilisateurs qui respectent les conditions du giveaway."""
+    required_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
+    legacy_role = giveaway.get("requiredRoleId")
+    if legacy_role and legacy_role not in required_role_ids:
+        required_role_ids.append(legacy_role)
+
+    forbidden_role_ids: list[str] = list(giveaway.get("forbiddenRoleIds") or [])
+    min_balance: Optional[int] = giveaway.get("requiredMinBalance")
+
+    if not required_role_ids and not forbidden_role_ids and not min_balance:
+        return users
+
+    eligible: list[discord.User] = []
+    for user in users:
+        if (required_role_ids or forbidden_role_ids) and guild:
+            try:
+                member = guild.get_member(user.id) or await guild.fetch_member(user.id)
+                role_ids = {str(r.id) for r in member.roles}
+                if required_role_ids and not any(rid in role_ids for rid in required_role_ids):
+                    continue
+                if forbidden_role_ids and any(rid in role_ids for rid in forbidden_role_ids):
+                    continue
+            except Exception:
+                continue
+
+        if min_balance:
+            player = await api_get_json(f"/economy/players/{user.id}")
+            if not player or (player.get("balance") or 0) < min_balance:
+                continue
+
+        eligible.append(user)
+
+    return eligible
+
+
+def _build_giveaway_embed(giveaway: dict, ends_ts: int) -> discord.Embed:
+    lines = [f"Réagis avec {GIVEAWAY_EMOJI} pour participer !"]
+
+    if giveaway.get("hostId"):
+        lines.append(f"\n👤 **Organisé par** <@{giveaway['hostId']}>")
+
+    conds: list[str] = []
+    req_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
+    if giveaway.get("requiredRoleId") and giveaway["requiredRoleId"] not in req_role_ids:
+        req_role_ids.append(giveaway["requiredRoleId"])
+    if req_role_ids:
+        conds.append("✅ Rôles autorisés : " + " ".join(f"<@&{rid}>" for rid in req_role_ids))
+    for rid in giveaway.get("forbiddenRoleIds") or []:
+        conds.append(f"🚫 Rôle interdit : <@&{rid}>")
+    if giveaway.get("requiredMinBalance"):
+        conds.append(f"💰 Solde minimum : {giveaway['requiredMinBalance']:,}")
+    if conds:
+        lines.append("\n**Conditions**\n" + "\n".join(conds))
+
+    rewards: list[dict] = giveaway.get("rewards") or []
+    if rewards:
+        reward_lines: list[str] = []
+        for r in rewards:
+            if r["type"] == "money":
+                reward_lines.append(f"💰 {r['amount']:,} pièces")
+            elif r["type"] == "role":
+                dur = r.get("roleDurationMinutes")
+                dur_str = f" ⏱ {_fmt_duration(dur)}" if dur else ""
+                reward_lines.append(f"🎭 <@&{r['roleId']}>{dur_str}")
+            elif r["type"] == "item":
+                item_label = r.get("itemName") or f"Item #{r.get('itemId', '?')}"
+                reward_lines.append(f"📦 {item_label}")
+        lines.append("\n**Récompenses supplémentaires**\n" + "\n".join(reward_lines))
+
+    lines.append(f"\n**Fin :** <t:{ends_ts}:R>  (<t:{ends_ts}:f>)")
+    lines.append(f"**🏆 Gagnants :** {giveaway['winnersCount']}")
+
+    embed = discord.Embed(
+        title=f"{GIVEAWAY_EMOJI}  GIVEAWAY  {GIVEAWAY_EMOJI}",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Giveaway #{giveaway['id']}")
+    return embed
+
+
+async def _post_giveaway_embed(giveaway: dict) -> None:
+    channel_id = int(giveaway["channelId"])
+    giveaway_id = giveaway["id"]
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception as exc:
+            logger.error("Giveaway #%d: cannot find channel %s: %s", giveaway_id, channel_id, exc)
+            return
+
+    ends_at = datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00"))
+    ends_ts = int(ends_at.timestamp())
+    embed = _build_giveaway_embed(giveaway, ends_ts)
+
+    mentioned = giveaway.get("mentionedRoleIds") or []
+    mention_ping = " ".join(f"<@&{rid}>" for rid in mentioned) if mentioned else ""
+
+    try:
+        if mention_ping:
+            await channel.send(mention_ping)
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction(GIVEAWAY_EMOJI)
+        await api_patch(
+            f"/giveaways/{giveaway_id}",
+            {
+                "messageId": str(msg.id),
+                "guildId": str(channel.guild.id),
+            },
+        )
+    except Exception as exc:
+        logger.error("Giveaway #%d: failed to post: %s", giveaway_id, exc)
+
+
+async def _deliver_rewards(winners: list[discord.User], giveaway: dict, guild: Optional[discord.Guild]) -> None:
+    rewards: list[dict] = giveaway.get("rewards") or []
+    if not rewards:
+        return
+    for winner in winners:
+        for reward in rewards:
+            try:
+                if reward["type"] == "money" and reward.get("amount"):
+                    eco = await api_get_json(f"/economy/players/{winner.id}")
+                    if eco is not None:
+                        new_wallet = (eco.get("wallet") or 0) + reward["amount"]
+                        await api_patch(f"/economy/players/{winner.id}", {"wallet": new_wallet})
+                elif reward["type"] == "role" and reward.get("roleId") and guild:
+                    member = guild.get_member(winner.id) or await guild.fetch_member(winner.id)
+                    role = guild.get_role(int(reward["roleId"]))
+                    if role and member:
+                        await member.add_roles(role, reason=f"Giveaway #{giveaway['id']} reward")
+                        dur_min = reward.get("roleDurationMinutes")
+                        if dur_min and isinstance(dur_min, (int, float)):
+                            expires = datetime.now(timezone.utc) + timedelta(minutes=dur_min)
+                            await api_post(
+                                "/temporary-roles",
+                                {
+                                    "userId": str(winner.id),
+                                    "guildId": str(guild.id),
+                                    "roleId": str(role.id),
+                                    "expiresAt": expires.isoformat(),
+                                    "reason": f"Giveaway #{giveaway['id']} — {_fmt_duration(dur_min)}",
+                                },
+                            )
+                elif reward["type"] == "item" and reward.get("itemId"):
+                    item_id = reward["itemId"]
+                    await api_post(
+                        "/inventory",
+                        {
+                            "userId": str(winner.id),
+                            "itemId": item_id,
+                            "quantity": 1,
+                            "source": "giveaway",
+                        },
+                    )
+            except Exception as exc:
+                logger.error("Giveaway reward delivery error for %s: %s", winner.id, exc)
+
+
+async def _end_giveaway(giveaway: dict) -> None:
+    giveaway_id = giveaway["id"]
+    channel_id = int(giveaway["channelId"])
+    message_id = int(giveaway["messageId"])
+    winners_count = giveaway["winnersCount"]
+
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+    except Exception as exc:
+        logger.error("Giveaway #%d: cannot fetch message: %s", giveaway_id, exc)
+        await api_post(f"/giveaways/{giveaway_id}/end", {"winners": []})
+        return
+
+    raw_reactors: list[discord.User] = []
+    for reaction in message.reactions:
+        if str(reaction.emoji) == GIVEAWAY_EMOJI:
+            async for user in reaction.users():
+                if not user.bot:
+                    raw_reactors.append(user)
+            break
+
+    reactors = await _filter_eligible(raw_reactors, message.guild, giveaway)
+
+    winners: list[discord.User] = []
+    if reactors:
+        winners = random.sample(reactors, min(winners_count, len(reactors)))
+
+    winner_ids = [str(w.id) for w in winners]
+    await api_post(f"/giveaways/{giveaway_id}/end", {"winners": winner_ids})
+    await _deliver_rewards(winners, giveaway, message.guild)
+
+    ends_ts = int(datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00")).timestamp())
+    
+    ended_embed = discord.Embed(
+        title="🎊  GIVEAWAY TERMINÉ  🎊",
+        description=(
+            f"**Prix :** {giveaway.get('prize', 'Lot')}\n\n"
+            + (
+                "**🏆 Gagnant(s) :** " + ", ".join(w.mention for w in winners)
+                if winners
+                else "😔 Aucun participant éligible"
+            )
+            + f"\n\n**Fin :** <t:{ends_ts}:f>"
+        ),
+        color=discord.Color.greyple(),
+    )
+    try:
+        await message.edit(embed=ended_embed)
+    except Exception:
+        pass
+
+    host_ping = f"<@{giveaway['hostId']}> " if giveaway.get("hostId") else ""
+    prize_name = giveaway.get('prize', 'le lot')
+    if winners:
+        mention_str = " ".join(w.mention for w in winners)
+        await channel.send(f"{host_ping}🎉 Félicitations {mention_str} ! Vous avez gagné **{prize_name}** !")
+    else:
+        await channel.send(f"{host_ping}Le giveaway **{prize_name}** s'est terminé sans participants éligibles.")
+
+
+# Modals et Vues de Giveaway Interactif existants
 class GiveawayParticipationView(discord.ui.View):
-    def __init__(self, db_data, prize, prize_type):
+    def __init__(self, db_data, prize, prize_type, allowed_roles):
         super().__init__(timeout=None)
         self.db_data = db_data
         self.prize = prize
         self.prize_type = prize_type
+        self.allowed_roles = allowed_roles
         self.participants = set()
 
     @discord.ui.button(label="🎉 Participer", style=discord.ButtonStyle.green, custom_id="giveaway_join")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_role_names = [role.name for role in interaction.user.roles]
+        user_role_ids = [role.id for role in interaction.user.roles]
+
         banned_roles = self.db_data.get("banned_roles", [])
-        
         for banned in banned_roles:
             if banned in user_role_names:
                 await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer.", ephemeral=True)
+                return
+
+        if self.allowed_roles:
+            has_allowed_role = any(r in user_role_names or r in user_role_ids for r in self.allowed_roles)
+            if not has_allowed_role:
+                await interaction.response.send_message("❌ Tu ne possèdes pas l'un des rôles requis pour participer.", ephemeral=True)
                 return
 
         if interaction.user.id in self.participants:
@@ -102,58 +388,9 @@ class GiveawayParticipationView(discord.ui.View):
             await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
 
 
-async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds, view, message):
-    await asyncio.sleep(duration_seconds)
-    
-    if not view.participants:
-        embed = discord.Embed(
-            title="🎉 Giveaway Terminé !", 
-            description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
-            color=discord.Color.red()
-        )
-        try:
-            await message.edit(embed=embed, view=None)
-        except Exception:
-            pass
-        await channel.send(f"Le giveaway pour **{prize}** est annulé par manque de participants.")
-        return
-
-    winner_id = random.choice(list(view.participants))
-    reward_msg = ""
-    
-    if prize_type == "Argent (Coins)":
-        import re
-        numbers = re.findall(r'\d+', prize)
-        amount = int(numbers[0]) if numbers else 100
-        if winner_id not in user_balances:
-            user_balances[winner_id] = {"wallet": 200, "bank": 0}
-        user_balances[winner_id]["wallet"] += amount
-        reward_msg = f"\n💰 **{amount} coins** ont été ajoutés à son portefeuille !"
-        
-    elif prize_type == "Niveau / XP":
-        import re
-        numbers = re.findall(r'\d+', prize)
-        lvl_add = int(numbers[0]) if numbers else 1
-        if winner_id not in user_levels:
-            user_levels[winner_id] = {"xp": 0, "level": 1}
-        user_levels[winner_id]["level"] += lvl_add
-        reward_msg = f"\n📊 Son niveau a augmenté de +{lvl_add} !"
-
-    embed = discord.Embed(
-        title="🎉 Giveaway Terminé !", 
-        description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
-        color=discord.Color.gold()
-    )
-    try:
-        await message.edit(embed=embed, view=None)
-    except Exception:
-        pass
-    await channel.send(f"🎊 Félicitations <@{winner_id}> ! Tu remportes **{prize}** !")
-
-
-class GiveawayEditModal(discord.ui.Modal, title="Configurer le Giveaway"):
-    prize_input = discord.ui.TextInput(label="Lot à gagner", placeholder="Ex: 500 Coins", default="Nitro Classic")
-    duration_input = discord.ui.TextInput(label="Durée (en minutes)", placeholder="Ex: 5", default="5")
+class GiveawayEditModal(discord.ui.Modal, title="Modifier le Lot et la Durée"):
+    prize_input = discord.ui.TextInput(label="Lot à gagner", default="Nitro Classic")
+    duration_input = discord.ui.TextInput(label="Durée (en minutes)", default="5")
 
     def __init__(self, panel_view):
         super().__init__()
@@ -165,7 +402,6 @@ class GiveawayEditModal(discord.ui.Modal, title="Configurer le Giveaway"):
             self.panel_view.duration = int(self.duration_input.value)
         except ValueError:
             self.panel_view.duration = 5
-        
         await self.panel_view.update_panel(interaction)
 
 
@@ -176,21 +412,21 @@ class GiveawayPanel(discord.ui.View):
         self.prize = "Nitro Classic"
         self.duration = 5
         self.prize_type = "Argent (Coins)"
+        self.ping_role = None
+        self.allowed_role = None
 
     async def update_panel(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="⚙️ Panneau de Configuration - Giveaway",
-            description="Modifie les paramètres ci-dessous, puis clique sur **Lancer**.",
+            description="Personnalisez les paramètres, puis cliquez sur **Lancer**.",
             color=discord.Color.blurple()
         )
         embed.add_field(name="🎁 Lot", value=f"`{self.prize}`", inline=True)
         embed.add_field(name="⏱️ Durée", value=f"`{self.duration} minute(s)`", inline=True)
         embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
-
-        if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=self)
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
+        embed.add_field(name="🔔 Rôle mentionné", value=self.ping_role.mention if self.ping_role else "`Aucun`", inline=True)
+        embed.add_field(name="🛡️ Rôle requis", value=self.allowed_role.mention if self.allowed_role else "`Aucun`", inline=True)
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="✏️ Modifier Lot & Durée", style=discord.ButtonStyle.primary, row=0)
     async def edit_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -201,15 +437,27 @@ class GiveawayPanel(discord.ui.View):
         row=1,
         options=[
             discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
-            discord.SelectOption(label="Niveau / XP", description="Augmente le niveau du gagnant"),
-            discord.SelectOption(label="Item / Autre", description="Autre type de lot manuel")
+            discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
+            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire"),
+            discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
+            discord.SelectOption(label="Item / Autre", description="Autre type de lot")
         ]
     )
     async def select_prize_type(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.prize_type = select.values[0]
         await self.update_panel(interaction)
 
-    @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=2)
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choisir un rôle à mentionner...", row=2, min_values=0, max_values=1)
+    async def select_ping_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.ping_role = select.values[0] if select.values else None
+        await self.update_panel(interaction)
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choisir un rôle requis...", row=3, min_values=0, max_values=1)
+    async def select_allowed_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.allowed_role = select.values[0] if select.values else None
+        await self.update_panel(interaction)
+
+    @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=4)
     async def launch_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             with open("data.json", "r", encoding="utf-8") as f:
@@ -221,23 +469,21 @@ class GiveawayPanel(discord.ui.View):
             title="🎉 GIVEAWAY 🎉",
             description=f"🎁 **Lot :** {self.prize}\n"
                         f"📌 **Type :** {self.prize_type}\n"
-                        f"⏱️ **Durée :** {self.duration} minute(s)\n\n"
+                        f"⏱️ **Durée :** {self.duration} minute(s)\n"
+                        f"{f'🛡️ **Rôle requis :** {self.allowed_role.mention}' if self.allowed_role else ''}\n\n"
                         f"Clique sur le bouton **🎉 Participer** ci-dessous !",
             color=discord.Color.blue()
         )
 
-        view = GiveawayParticipationView(db_data, self.prize, self.prize_type)
+        allowed_roles_list = [self.allowed_role.name] if self.allowed_role else []
+        view = GiveawayParticipationView(db_data, self.prize, self.prize_type, allowed_roles_list)
+        content_to_send = self.ping_role.mention if self.ping_role else None
         
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-
-        message = await interaction.channel.send(embed=embed, view=view)
-        bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message))
+        await interaction.message.delete()
+        message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
 
 
-# ── 4. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
+# ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
 
 async def handle_leveling(message: discord.Message):
     if message.author.bot:
@@ -263,325 +509,85 @@ async def handle_leveling(message: discord.Message):
         )
 
 
-# ── 5. TOUTES LES COMMANDES SLASH DU BOT ──────────────────────────────────────
+# ── 4. COMMANDES SLASH (JEUX & ÉCONOMIE & NIVEAUX) ───────────────────────────
 
-@bot.tree.command(name="startguess", description="Lance une partie de Guess the Number dans le salon")
+@bot.tree.command(name="startguess", description="Lance une partie de Guess the Number")
 @app_commands.describe(min_num="Nombre minimum", max_num="Nombre maximum")
 async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_num: int = 100):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Tu dois être admin pour lancer ce jeu.", ephemeral=True)
+        await interaction.response.send_message("❌ Tu dois être admin.", ephemeral=True)
         return
 
     channel_id = interaction.channel.id
     if channel_id in active_guesses:
-        await interaction.response.send_message("⚠️ Une partie est déjà en cours dans ce salon !", ephemeral=True)
-        return
-
-    if min_num >= max_num:
-        await interaction.response.send_message("❌ Le nombre minimum doit être inférieur au maximum.", ephemeral=True)
+        await interaction.response.send_message("⚠️ Une partie est déjà en cours !", ephemeral=True)
         return
 
     secret_number = random.randint(min_num, max_num)
     active_guesses[channel_id] = {"target": secret_number, "attempts": 0, "participants": set()}
 
-    try:
-        await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
-    except discord.Forbidden:
-        pass
-
-    embed = discord.Embed(
-        title="🔢 Devine le nombre !",
-        description=f"Un nombre mystère entre **{min_num}** et **{max_num}** a été choisi !\n"
-                    f"Envoyez vos propositions directement dans ce salon.",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="🔢 Devine le nombre !", description=f"Entre {min_num} et {max_num}.", color=discord.Color.blue())
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="giveaway", description="Ouvre le panneau de configuration du Giveaway")
-async def giveaway(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        with open("data.json", "r", encoding="utf-8") as f:
-            db_data = json.load(f)
-    except FileNotFoundError:
-        db_data = {"permissions": {}, "banned_roles": []}
-
-    permissions = db_data.get("permissions", {})
-    if permissions.get("giveaway", "admin") == "admin" and not interaction.user.guild_permissions.administrator:
-        await interaction.followup.send("❌ Cette commande est réservée aux administrateurs.", ephemeral=True)
-        return
-
-    banned_roles = db_data.get("banned_roles", [])
-    user_roles = [role.name for role in interaction.user.roles]
-    for banned in banned_roles:
-        if banned in user_roles:
-            await interaction.followup.send(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
-            return
-
+async def giveaway_command(interaction: discord.Interaction):
     panel_view = GiveawayPanel(interaction)
-    
-    embed = discord.Embed(
-        title="⚙️ Panneau de Configuration - Giveaway",
-        description="Personnalisez les paramètres de votre giveaway ci-dessous, puis cliquez sur **Lancer**.",
-        color=discord.Color.blurple()
-    )
-    embed.add_field(name="🎁 Lot", value="`Nitro Classic`", inline=True)
-    embed.add_field(name="⏱️ Durée", value="`5 minute(s)`", inline=True)
-    embed.add_field(name="📌 Type de prix", value="`Argent (Coins)`", inline=True)
-
-    await interaction.followup.send(embed=embed, view=panel_view, ephemeral=True)
+    embed = discord.Embed(title="⚙️ Panneau de Configuration - Giveaway", color=discord.Color.blurple())
+    await interaction.response.send_message(embed=embed, view=panel_view, ephemeral=True)
 
 
-@bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
-@app_commands.describe(member="Le membre à consulter")
+@bot.tree.command(name="balance", description="Vérifie ton solde")
 async def balance(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
-    user_id = target.id
-
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    bal = user_balances[user_id]
-    embed = discord.Embed(title=f"💰 Portefeuille de {target.display_name}", color=discord.Color.gold())
-    embed.add_field(name="Portefeuille", value=f"**{bal['wallet']}** coins", inline=True)
-    embed.add_field(name="Banque", value=f"**{bal['bank']}** coins", inline=True)
+    bal = user_balances.setdefault(target.id, {"wallet": 200, "bank": 0})
+    embed = discord.Embed(title=f"💰 Solde de {target.display_name}", color=discord.Color.gold())
+    embed.add_field(name="Portefeuille", value=f"{bal['wallet']} coins")
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="level", description="Vérifie ton niveau actuel ou celui d'un membre")
-@app_commands.describe(member="Le membre à consulter")
+@bot.tree.command(name="level", description="Vérifie ton niveau")
 async def level(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
-    user_id = target.id
-
-    if user_id not in user_levels:
-        user_levels[user_id] = {"xp": 0, "level": 1}
-
-    lvl_data = user_levels[user_id]
-    xp_needed = lvl_data["level"] * 100
-
+    lvl = user_levels.setdefault(target.id, {"xp": 0, "level": 1})
     embed = discord.Embed(title=f"📊 Niveau de {target.display_name}", color=discord.Color.purple())
-    embed.add_field(name="Niveau", value=f"**{lvl_data['level']}**", inline=True)
-    embed.add_field(name="XP", value=f"**{lvl_data['xp']} / {xp_needed}**", inline=True)
+    embed.add_field(name="Niveau", value=str(lvl["level"]))
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="higherlower", description="Parie des coins sur un jeu de Higher/Lower")
-@app_commands.describe(bet="Montant de ta mise", choice="Choisis 'higher' (plus haut) ou 'lower' (plus bas)")
-@app_commands.choices(choice=[
-    app_commands.Choice(name="Plus haut (Higher)", value="higher"),
-    app_commands.Choice(name="Plus bas (Lower)", value="lower")
-])
-async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
-    user_id = interaction.user.id
+# ── BOUCLES D'ARRIÈRE-PLAN ───────────────────────────────────────────────────
 
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    if bet <= 0:
-        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+@tasks.loop(seconds=30)
+async def giveaway_poll_loop() -> None:
+    active = await api_get_list("/giveaways?status=active")
+    if not active:
         return
+    now = datetime.now(timezone.utc)
+    for giveaway in active:
+        if not giveaway.get("messageId"):
+            await _post_giveaway_embed(giveaway)
+            continue
+        ends_at = datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00"))
+        if now >= ends_at:
+            await _end_giveaway(giveaway)
 
-    if user_balances[user_id]["wallet"] < bet:
-        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+
+@tasks.loop(minutes=1)
+async def temp_role_poll_loop() -> None:
+    pending = await api_get_list("/temporary-roles/pending")
+    if not pending:
         return
+    for entry in pending:
+        try:
+            guild = bot.get_guild(int(entry["guildId"])) or await bot.fetch_guild(int(entry["guildId"]))
+            member = guild.get_member(int(entry["userId"])) or await guild.fetch_member(int(entry["userId"]))
+            role = guild.get_role(int(entry["roleId"]))
+            if role and member and role in member.roles:
+                await member.remove_roles(role, reason="Rôle temporaire expiré")
+        except Exception as exc:
+            logger.warning("Erreur suppression rôle temporaire: %s", exc)
+        await api_patch(f"/temporary-roles/{entry['id']}/removed", {})
 
-    user_balances[user_id]["wallet"] -= bet
-
-    base_number = random.randint(1, 50)
-    secret_number = random.randint(1, 100)
-
-    won = False
-    if choice == "higher" and secret_number > base_number:
-        won = True
-    elif choice == "lower" and secret_number < base_number:
-        won = True
-
-    embed = discord.Embed(title="🎲 Higher / Lower", color=discord.Color.orange())
-    embed.add_field(name="Nombre de base", value=f"**{base_number}**", inline=True)
-    embed.add_field(name="Ton choix", value=f"**{choice.upper()}**", inline=True)
-    embed.add_field(name="Nombre mystère", value=f"**{secret_number}**", inline=False)
-
-    if won:
-        winnings = bet * 2
-        user_balances[user_id]["wallet"] += winnings
-        embed.description = f"🎉 Gagné ! Tu remportes **{winnings}** coins !"
-        embed.color = discord.Color.green()
-    else:
-        embed.description = f"😢 Perdu ! Tu as perdu ta mise de **{bet}** coins."
-        embed.color = discord.Color.red()
-
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="roulette", description="Parie des coins à la roulette (red, black ou green)")
-@app_commands.describe(bet="Montant de ta mise", choice="Choisis red, black ou green")
-@app_commands.choices(choice=[
-    app_commands.Choice(name="Rouge (x2)", value="red"),
-    app_commands.Choice(name="Noir (x2)", value="black"),
-    app_commands.Choice(name="Vert / Zéro (x14)", value="green")
-])
-async def roulette(interaction: discord.Interaction, bet: int, choice: str):
-    user_id = interaction.user.id
-
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    if bet <= 0:
-        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
-        return
-
-    if user_balances[user_id]["wallet"] < bet:
-        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
-        return
-
-    user_balances[user_id]["wallet"] -= bet
-    roll = random.choices(["red", "black", "green"], weights=[45, 45, 10])[0]
-
-    embed = discord.Embed(title="🎰 Roulette Casino", color=discord.Color.dark_embed())
-    embed.add_field(name="Ta mise", value=f"**{bet}** coins sur **{choice.upper()}**", inline=False)
-    embed.add_field(name="Résultat de la roue", value=f"**{roll.upper()}**", inline=False)
-
-    if roll == choice:
-        multiplier = 14 if roll == "green" else 2
-        winnings = bet * multiplier
-        user_balances[user_id]["wallet"] += winnings
-        embed.description = f"🎉 Jackpot ! C'est tombé sur **{roll.upper()}**. Tu gagnes **{winnings}** coins !"
-        embed.color = discord.Color.green()
-    else:
-        embed.description = f"😢 Perdu ! C'est tombé sur **{roll.upper()}**. Tu perds ta mise."
-        embed.color = discord.Color.red()
-
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="casino", description="Joue à la machine à sous (Slot Machine)")
-@app_commands.describe(bet="Montant de ta mise")
-async def casino(interaction: discord.Interaction, bet: int):
-    user_id = interaction.user.id
-
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    if bet <= 0:
-        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
-        return
-
-    if user_balances[user_id]["wallet"] < bet:
-        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
-        return
-
-    user_balances[user_id]["wallet"] -= bet
-    symbols = ["🍒", "🍋", "🍊", "🔔", "⭐", "💎"]
-    weights = [35, 30, 20, 10, 4, 1]
-    result = random.choices(symbols, weights=weights, k=3)
-
-    embed = discord.Embed(title="🎰 Machine à Sous", color=discord.Color.blue())
-    embed.add_field(name="Tirage", value=f"| {result[0]} | {result[1]} | {result[2]} |", inline=False)
-
-    if result[0] == result[1] == result[2]:
-        multiplier_dict = {"🍒": 5, "🍋": 10, "🍊": 15, "🔔": 25, "⭐": 50, "💎": 100}
-        mult = multiplier_dict.get(result[0], 5)
-        winnings = bet * mult
-        user_balances[user_id]["wallet"] += winnings
-        embed.description = f"🎉 TRIPLÉ ! 3 symboles **{result[0]}** ! Tu remportes **{winnings}** coins (x{mult}) !"
-        embed.color = discord.Color.green()
-    elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
-        winnings = int(bet * 1.5)
-        user_balances[user_id]["wallet"] += winnings
-        embed.description = f"✨ Pas mal ! 2 symboles identiques. Tu récupères **{winnings}** coins."
-        embed.color = discord.Color.gold()
-    else:
-        embed.description = f"😢 Rien du tout ! Tu perds ta mise de **{bet}** coins."
-        embed.color = discord.Color.red()
-
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="addmoney", description="[ADMIN] Ajoute des coins à l'argent d'un membre")
-@app_commands.describe(member="Le membre ciblé", amount="Le montant à ajouter")
-async def add_money(interaction: discord.Interaction, member: discord.Member, amount: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
-        return
-
-    if amount <= 0:
-        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
-        return
-
-    user_id = member.id
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    user_balances[user_id]["wallet"] += amount
-
-    embed = discord.Embed(
-        title="💰 Gestion de l'argent (Ajout)",
-        description=f"✅ **{amount}** coins ont été ajoutés au portefeuille de {member.mention}.\n"
-                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="removemoney", description="[ADMIN] Retire des coins à l'argent d'un membre")
-@app_commands.describe(member="Le membre ciblé", amount="Le montant à retirer")
-async def remove_money(interaction: discord.Interaction, member: discord.Member, amount: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
-        return
-
-    if amount <= 0:
-        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
-        return
-
-    user_id = member.id
-    if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}
-
-    if user_balances[user_id]["wallet"] < amount:
-        user_balances[user_id]["wallet"] = 0
-    else:
-        user_balances[user_id]["wallet"] -= amount
-
-    embed = discord.Embed(
-        title="💰 Gestion de l'argent (Retrait)",
-        description=f"⚠️ **{amount}** coins ont été retirés du portefeuille de {member.mention}.\n"
-                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
-        color=discord.Color.orange()
-    )
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="setlevel", description="[ADMIN] Modifie directement le niveau d'un membre")
-@app_commands.describe(member="Le membre ciblé", level_num="Le nouveau niveau")
-async def set_level(interaction: discord.Interaction, member: discord.Member, level_num: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
-        return
-
-    if level_num < 1:
-        await interaction.response.send_message("❌ Le niveau minimum est 1.", ephemeral=True)
-        return
-
-    user_id = member.id
-    if user_id not in user_levels:
-        user_levels[user_id] = {"xp": 0, "level": 1}
-
-    user_levels[user_id]["level"] = level_num
-    user_levels[user_id]["xp"] = 0
-
-    embed = discord.Embed(
-        title="📊 Gestion des Niveaux",
-        description=f"✅ Le niveau de {member.mention} a été défini à **{level_num}** (XP réinitialisée à 0).",
-        color=discord.Color.purple()
-    )
-    await interaction.response.send_message(embed=embed)
-
-
-# ── 6. TÂCHES DE FOND & ÉVÉNEMENTS ──────────────────────────────────────────────
 
 @tasks.loop(seconds=60)
 async def background_reminder_task():
@@ -589,21 +595,14 @@ async def background_reminder_task():
         channel = bot.get_channel(data["channel_id"])
         if not channel:
             continue
-        
-        target_role = None
-        for guild in bot.guilds:
-            role = discord.utils.get(guild.roles, name=data["role_name"])
-            if role:
-                target_role = role
-                break
-        
-        mention_str = target_role.mention if target_role else f"@{data['role_name']}"
-        embed = discord.Embed(title="⏰ Rappel Automatique", description=f"{mention_str} {data['title']}", color=discord.Color.gold())
+        embed = discord.Embed(title="⏰ Rappel Automatique", description=data["title"], color=discord.Color.gold())
         try:
             await channel.send(embed=embed)
         except Exception:
             pass
 
+
+# ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
@@ -616,6 +615,10 @@ async def on_ready():
     
     if not background_reminder_task.is_running():
         background_reminder_task.start()
+    if not giveaway_poll_loop.is_running():
+        giveaway_poll_loop.start()
+    if not temp_role_poll_loop.is_running():
+        temp_role_poll_loop.start()
 
 
 @bot.event
@@ -625,7 +628,7 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-# ── 7. LANCEMENT GLOBAL ──────────────────────────────────────────────────────
+# ── 6. LANCEMENT GLOBAL ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     dashboard_thread = threading.Thread(target=run_dashboard)
