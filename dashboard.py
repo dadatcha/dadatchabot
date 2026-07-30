@@ -7,10 +7,9 @@ from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-# Configuration JSONBin.io via variables d'environnement
-JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "")
+# Configuration JSONBin.io
+JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "").strip()
 
-# Dictionnaire par défaut des permissions
 default_permissions = {
     "startguess": "admin",
     "higherlower": "everyone",
@@ -24,31 +23,54 @@ default_permissions = {
     "reminders": "everyone"
 }
 
-# --- FONCTIONS DE LECTURE ET SAUVEGARDE JSONBIN ---
-def jsonbin_get(env_var_name, default_data):
+# --- FONCTION ROBUSTE JSONBIN (AUTO-CREATION SI ID VIDE) ---
+def jsonbin_get_or_create(env_var_name, default_data):
     bin_id = os.environ.get(env_var_name, "").strip()
-    if not bin_id or not JSONBIN_API_KEY:
-        print(f"[INFO] {env_var_name} ou JSONBIN_API_KEY manquant. Utilisation des données par défaut.")
+    
+    # Si la clé API est absente, on renvoie les données par défaut
+    if not JSONBIN_API_KEY:
+        print(f"[INFO] JSONBIN_API_KEY manquante pour {env_var_name}.")
         return default_data
+
+    # Si on a un ID, on essaie de le lire
+    if bin_id:
+        try:
+            url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
+            req = urllib.request.Request(url, headers={"X-Master-Key": JSONBIN_API_KEY})
+            with urllib.request.urlopen(req) as response:
+                data = json.loads(response.read().decode())
+                print(f"[SUCCES GET] Données chargées pour {env_var_name}")
+                return data.get("record", default_data)
+        except urllib.error.HTTPError as e:
+            print(f"[AVERTISSEMENT] Erreur {e.code} sur {env_var_name}, tentative de création d'un nouveau Bin...")
+        except Exception as e:
+            print(f"[AVERTISSEMENT] Erreur lecture {env_var_name} : {e}")
+
+    # Si aucun ID valide n'est fourni ou si l'ancien échoue, on crée un Bin automatiquement !
     try:
-        url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
-        req = urllib.request.Request(url, headers={"X-Master-Key": JSONBIN_API_KEY})
+        url = "https://api.jsonbin.io/v3/b"
+        payload = json.dumps(default_data).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={
+            "Content-Type": "application/json",
+            "X-Master-Key": JSONBIN_API_KEY,
+            "X-Bin-Name": env_var_name
+        }, method="POST")
         with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode())
-            print(f"[SUCCES GET] Données chargées depuis {env_var_name}")
-            return data.get("record", default_data)
+            res_data = json.loads(response.read().decode())
+            new_id = res_data["metadata"]["id"]
+            print(f"==================================================")
+            print(f"[NOUVEAU BIN CREE] Copie cet ID dans Render pour {env_var_name} : {new_id}")
+            print(f"==================================================")
+            return res_data.get("record", default_data)
     except Exception as e:
-        print(f"[ERREUR GET] Impossible de lire {env_var_name} : {e}")
+        print(f"[ERREUR CRITIQUE] Impossible de créer le Bin {env_var_name} : {e}")
         return default_data
 
 def jsonbin_save(env_var_name, data):
     bin_id = os.environ.get(env_var_name, "").strip()
-    print(f"[DEBUG] Tentative de sauvegarde sur {env_var_name} (ID: '{bin_id}')")
-    
     if not bin_id or not JSONBIN_API_KEY:
-        print(f"[ERREUR] Impossible de sauvegarder : {env_var_name} ou JSONBIN_API_KEY est vide sur Render.")
+        print(f"[ERREUR SAVE] Impossible de sauvegarder : ID ou clé manquante pour {env_var_name}.")
         return
-        
     try:
         url = f"https://api.jsonbin.io/v3/b/{bin_id}"
         payload = json.dumps(data).encode("utf-8")
@@ -56,21 +78,17 @@ def jsonbin_save(env_var_name, data):
             "Content-Type": "application/json",
             "X-Master-Key": JSONBIN_API_KEY
         }, method="PUT")
-        
         with urllib.request.urlopen(req) as response:
-            response_body = response.read().decode()
-            print(f"[SUCCES SAVE] Sauvegarde réussie sur {env_var_name} ! Réponse JSONBin : {response_body}")
-            
+            print(f"[SUCCES SAVE] Sauvegarde réussie sur {env_var_name} !")
     except urllib.error.HTTPError as e:
         error_details = e.read().decode()
         print(f"[ERREUR HTTP {e.code}] Echec de sauvegarde sur {env_var_name} : {error_details}")
     except Exception as e:
-        print(f"[ERREUR CRITIQUE] Echec de sauvegarde sur {env_var_name} : {e}")
+        print(f"[ERREUR SAVE] : {e}")
 
-# --- CHARGEMENT INITIAL DES DONNÉES ---
-command_permissions = jsonbin_get("PERMS_BIN_ID", default_permissions.copy())
-
-raw_reminders = jsonbin_get("REMINDERS_BIN_ID", {})
+# --- CHARGEMENT ---
+command_permissions = jsonbin_get_or_create("PERMS_BIN_ID", default_permissions.copy())
+raw_reminders = jsonbin_get_or_create("REMINDERS_BIN_ID", {})
 reminders_db = {int(k): v for k, v in raw_reminders.items() if str(k).isdigit()}
 
 if reminders_db:
@@ -256,7 +274,7 @@ def sync_github():
         else:
             sync_status = f"Erreur Git : {result.stderr.strip()}"
     except Exception as e:
-        sync_status = f"Impossible d'exécuter la synchro GitHub : {e}"
+            sync_status = f"Impossible d'exécuter la synchro GitHub : {e}"
     return redirect(url_for("index"))
 
 @app.route("/sync/render", methods=["POST"])
