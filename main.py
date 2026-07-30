@@ -100,413 +100,444 @@ class GuessGameView:
 
 # ── SYSTÈME DE GIVEAWAY & RÔLES TEMPORAIRES AVANCÉS ──────────────────────────
 
+# ── Giveaway helpers ──────────────────────────────────────────────────────────
+
 GIVEAWAY_EMOJI = "🎉"
 
+# ── Duration helpers (shared by giveaway + temp-role display) ─────────────────
+
+
 def _parse_duration(s: str) -> Optional[int]:
-    """Parse '7j'/'7d', '24h', '30m', ou un nombre brut en minutes."""
-    s = s.strip().lower()
-    if not s:
-        return None
-    if s.endswith("j") or s.endswith("d"):
-        return int(s[:-1]) * 1440
-    if s.endswith("h"):
-        return int(s[:-1]) * 60
-    if s.endswith("m"):
-        return int(s[:-1])
-    return int(s)
+    """Parse '7j'/'7d', '24h', '30m', or a plain number into minutes. Returns None for empty."""
+    s = s.strip().lower()
+    if not s:
+        return None
+    if s.endswith("j") or s.endswith("d"):
+        return int(s[:-1]) * 1440
+    if s.endswith("h"):
+        return int(s[:-1]) * 60
+    if s.endswith("m"):
+        return int(s[:-1])
+    return int(s)
 
 
 def _fmt_duration(minutes: int) -> str:
-    """Formate un nombre de minutes en chaîne lisible."""
-    if minutes < 60:
-        return f"{minutes} min"
-    if minutes < 1440:
-        h, m = divmod(minutes, 60)
-        return f"{h}h{m:02d}" if m else f"{h}h"
-    d = minutes // 1440
-    return f"{d} jour{'s' if d > 1 else ''}"
+    """Format a minute count as a human-readable string."""
+    if minutes < 60:
+        return f"{minutes} min"
+    if minutes < 1440:
+        h, m = divmod(minutes, 60)
+        return f"{h}h{m:02d}" if m else f"{h}h"
+    d = minutes // 1440
+    return f"{d} jour{'s' if d > 1 else ''}"
 
 
 async def _filter_eligible(
-    users: list[discord.User],
-    guild: Optional[discord.Guild],
-    giveaway: dict,
+    users: list[discord.User],
+    guild: Optional[discord.Guild],
+    giveaway: dict,
 ) -> list[discord.User]:
-    """Retourne les utilisateurs qui respectent les conditions du giveaway."""
-    required_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
-    legacy_role = giveaway.get("requiredRoleId")
-    if legacy_role and legacy_role not in required_role_ids:
-        required_role_ids.append(legacy_role)
+    """Return users that meet the giveaway's optional conditions."""
+    # Merge legacy single-role field with new plural list
+    required_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
+    legacy_role = giveaway.get("requiredRoleId")
+    if legacy_role and legacy_role not in required_role_ids:
+        required_role_ids.append(legacy_role)
 
-    forbidden_role_ids: list[str] = list(giveaway.get("forbiddenRoleIds") or [])
-    min_balance: Optional[int] = giveaway.get("requiredMinBalance")
+    forbidden_role_ids: list[str] = list(giveaway.get("forbiddenRoleIds") or [])
+    min_balance: Optional[int] = giveaway.get("requiredMinBalance")
 
-    if not required_role_ids and not forbidden_role_ids and not min_balance:
-        return users
+    if not required_role_ids and not forbidden_role_ids and not min_balance:
+        return users  # no conditions — everyone is eligible
 
-    eligible: list[discord.User] = []
-    for user in users:
-        if (required_role_ids or forbidden_role_ids) and guild:
-            try:
-                member = guild.get_member(user.id) or await guild.fetch_member(user.id)
-                role_ids = {str(r.id) for r in member.roles}
-                if required_role_ids and not any(rid in role_ids for rid in required_role_ids):
-                    continue
-                if forbidden_role_ids and any(rid in role_ids for rid in forbidden_role_ids):
-                    continue
-            except Exception:
-                continue
+    eligible: list[discord.User] = []
+    for user in users:
+        # ── Role checks ─────────────────────────────────────────────────────
+        if (required_role_ids or forbidden_role_ids) and guild:
+            try:
+                member = guild.get_member(user.id) or await guild.fetch_member(user.id)
+                role_ids = {str(r.id) for r in member.roles}
+                # Must have at least one of the required roles (OR logic)
+                if required_role_ids and not any(
+                    rid in role_ids for rid in required_role_ids
+                ):
+                    continue
+                # Must NOT have any forbidden role
+                if forbidden_role_ids and any(
+                    rid in role_ids for rid in forbidden_role_ids
+                ):
+                    continue
+            except Exception:
+                continue  # can't fetch member → exclude
 
-        if min_balance:
-            player = await api_get_json(f"/economy/players/{user.id}")
-            if not player or (player.get("balance") or 0) < min_balance:
-                continue
+        # ── Balance check ────────────────────────────────────────────────────
+        if min_balance:
+            player = await api_get_json(f"/economy/players/{user.id}")
+            if not player or (player.get("balance") or 0) < min_balance:
+                continue
 
-        eligible.append(user)
+        eligible.append(user)
 
-    return eligible
+    return eligible
 
 
 def _build_giveaway_embed(giveaway: dict, ends_ts: int) -> discord.Embed:
-    lines = [f"Réagis avec {GIVEAWAY_EMOJI} pour participer !"]
+    """Build the active giveaway embed."""
+    lines = [f"Réagis avec {GIVEAWAY_EMOJI} pour participer !"]
 
-    if giveaway.get("hostId"):
-        lines.append(f"\n👤 **Organisé par** <@{giveaway['hostId']}>")
+    # Host
+    if giveaway.get("hostId"):
+        lines.append(f"\n👤 **Organisé par** <@{giveaway['hostId']}>")
 
-    conds: list[str] = []
-    req_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
-    if giveaway.get("requiredRoleId") and giveaway["requiredRoleId"] not in req_role_ids:
-        req_role_ids.append(giveaway["requiredRoleId"])
-    if req_role_ids:
-        conds.append("✅ Rôles autorisés : " + " ".join(f"<@&{rid}>" for rid in req_role_ids))
-    for rid in giveaway.get("forbiddenRoleIds") or []:
-        conds.append(f"🚫 Rôle interdit : <@&{rid}>")
-    if giveaway.get("requiredMinBalance"):
-        conds.append(f"💰 Solde minimum : {giveaway['requiredMinBalance']:,}")
-    if conds:
-        lines.append("\n**Conditions**\n" + "\n".join(conds))
+    # Conditions section
+    conds: list[str] = []
+    req_role_ids: list[str] = list(giveaway.get("requiredRoleIds") or [])
+    if (
+        giveaway.get("requiredRoleId")
+        and giveaway["requiredRoleId"] not in req_role_ids
+    ):
+        req_role_ids.append(giveaway["requiredRoleId"])
+    if req_role_ids:
+        conds.append(
+            "✅ Rôles autorisés : " + " ".join(f"<@&{rid}>" for rid in req_role_ids)
+        )
+    for rid in giveaway.get("forbiddenRoleIds") or []:
+        conds.append(f"🚫 Rôle interdit : <@&{rid}>")
+    if giveaway.get("requiredMinBalance"):
+        conds.append(f"💰 Solde minimum : {giveaway['requiredMinBalance']:,}")
+    if conds:
+        lines.append("\n**Conditions**\n" + "\n".join(conds))
 
-    rewards: list[dict] = giveaway.get("rewards") or []
-    if rewards:
-        reward_lines: list[str] = []
-        for r in rewards:
-            if r["type"] == "money":
-                reward_lines.append(f"💰 {r['amount']:,} pièces")
-            elif r["type"] == "role":
-                dur = r.get("roleDurationMinutes")
-                dur_str = f" ⏱ {_fmt_duration(dur)}" if dur else ""
-                reward_lines.append(f"🎭 <@&{r['roleId']}>{dur_str}")
-            elif r["type"] == "item":
-                item_label = r.get("itemName") or f"Item #{r.get('itemId', '?')}"
-                reward_lines.append(f"📦 {item_label}")
-        lines.append("\n**Récompenses supplémentaires**\n" + "\n".join(reward_lines))
+    # Rewards section
+    rewards: list[dict] = giveaway.get("rewards") or []
+    if rewards:
+        reward_lines: list[str] = []
+        for r in rewards:
+            if r["type"] == "money":
+                reward_lines.append(f"💰 {r['amount']:,} pièces")
+            elif r["type"] == "role":
+                dur = r.get("roleDurationMinutes")
+                dur_str = f" ⏱ {_fmt_duration(dur)}" if dur else ""
+                reward_lines.append(f"🎭 <@&{r['roleId']}>{dur_str}")
+            elif r["type"] == "item":
+                item_label = r.get("itemName") or f"Item #{r.get('itemId', '?')}"
+                reward_lines.append(f"📦 {item_label}")
+        lines.append("\n**Récompenses supplémentaires**\n" + "\n".join(reward_lines))
 
-    lines.append(f"\n**Fin :** <t:{ends_ts}:R>  (<t:{ends_ts}:f>)")
-    lines.append(f"**🏆 Gagnants :** {giveaway['winnersCount']}")
+    lines.append(f"\n**Fin :** <t:{ends_ts}:R>  (<t:{ends_ts}:f>)")
+    lines.append(f"**🏆 Gagnants :** {giveaway['winnersCount']}")
 
-    embed = discord.Embed(
-        title=f"{GIVEAWAY_EMOJI}  GIVEAWAY  {GIVEAWAY_EMOJI}",
-        description="\n".join(lines),
-        color=discord.Color.gold(),
-    )
-    embed.set_footer(text=f"Giveaway #{giveaway['id']}")
-    return embed
+    embed = discord.Embed(
+        title=f"{GIVEAWAY_EMOJI}  GIVEAWAY  {GIVEAWAY_EMOJI}",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Giveaway #{giveaway['id']}")
+    return embed
 
 
 async def _post_giveaway_embed(giveaway: dict) -> None:
-    channel_id = int(giveaway["channelId"])
-    giveaway_id = giveaway["id"]
+    """Post the giveaway embed to the target channel and update the API with messageId/guildId."""
+    channel_id = int(giveaway["channelId"])
+    giveaway_id = giveaway["id"]
 
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except Exception as exc:
-            logger.error("Giveaway #%d: cannot find channel %s: %s", giveaway_id, channel_id, exc)
-            return
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception as exc:
+            logger.error(
+                "Giveaway #%d: cannot find channel %s: %s", giveaway_id, channel_id, exc
+            )
+            return
 
-    ends_at = datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00"))
-    ends_ts = int(ends_at.timestamp())
-    embed = _build_giveaway_embed(giveaway, ends_ts)
+    ends_at = datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00"))
+    ends_ts = int(ends_at.timestamp())
+    embed = _build_giveaway_embed(giveaway, ends_ts)
 
-    mentioned = giveaway.get("mentionedRoleIds") or []
-    mention_ping = " ".join(f"<@&{rid}>" for rid in mentioned) if mentioned else ""
+    # Ping mentioned roles before the embed
+    mentioned = giveaway.get("mentionedRoleIds") or []
+    mention_ping = " ".join(f"<@&{rid}>" for rid in mentioned) if mentioned else ""
 
-    try:
-        if mention_ping:
-            await channel.send(mention_ping)
-        msg = await channel.send(embed=embed)
-        await msg.add_reaction(GIVEAWAY_EMOJI)
-        await api_patch(
-            f"/giveaways/{giveaway_id}",
-            {
-                "messageId": str(msg.id),
-                "guildId": str(channel.guild.id),
-            },
-        )
-    except Exception as exc:
-        logger.error("Giveaway #%d: failed to post: %s", giveaway_id, exc)
+    try:
+        if mention_ping:
+            await channel.send(mention_ping)
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction(GIVEAWAY_EMOJI)
+        await api_patch(
+            f"/giveaways/{giveaway_id}",
+            {
+                "messageId": str(msg.id),
+                "guildId": str(channel.guild.id),
+            },
+        )
+        logger.info(
+            "Giveaway #%d posted in channel %s (msg %s)",
+            giveaway_id,
+            channel_id,
+            msg.id,
+        )
+    except Exception as exc:
+        logger.error("Giveaway #%d: failed to post: %s", giveaway_id, exc)
 
 
-async def _deliver_rewards(winners: list[discord.User], giveaway: dict, guild: Optional[discord.Guild]) -> None:
-    rewards: list[dict] = giveaway.get("rewards") or []
-    if not rewards:
-        return
-    for winner in winners:
-        for reward in rewards:
-            try:
-                if reward["type"] == "money" and reward.get("amount"):
-                    eco = await api_get_json(f"/economy/players/{winner.id}")
-                    if eco is not None:
-                        new_wallet = (eco.get("wallet") or 0) + reward["amount"]
-                        await api_patch(f"/economy/players/{winner.id}", {"wallet": new_wallet})
-                elif reward["type"] == "role" and reward.get("roleId") and guild:
-                    member = guild.get_member(winner.id) or await guild.fetch_member(winner.id)
-                    role = guild.get_role(int(reward["roleId"]))
-                    if role and member:
-                        await member.add_roles(role, reason=f"Giveaway #{giveaway['id']} reward")
-                        dur_min = reward.get("roleDurationMinutes")
-                        if dur_min and isinstance(dur_min, (int, float)):
-                            expires = datetime.now(timezone.utc) + timedelta(minutes=dur_min)
-                            await api_post(
-                                "/temporary-roles",
-                                {
-                                    "userId": str(winner.id),
-                                    "guildId": str(guild.id),
-                                    "roleId": str(role.id),
-                                    "expiresAt": expires.isoformat(),
-                                    "reason": f"Giveaway #{giveaway['id']} — {_fmt_duration(dur_min)}",
-                                },
-                            )
-                elif reward["type"] == "item" and reward.get("itemId"):
-                    item_id = reward["itemId"]
-                    await api_post(
-                        "/inventory",
-                        {
-                            "userId": str(winner.id),
-                            "itemId": item_id,
-                            "quantity": 1,
-                            "source": "giveaway",
-                        },
-                    )
-            except Exception as exc:
-                logger.error("Giveaway reward delivery error for %s: %s", winner.id, exc)
+async def _deliver_rewards(
+    winners: list[discord.User], giveaway: dict, guild: Optional[discord.Guild]
+) -> None:
+    """Deliver money/role rewards to each winner."""
+    rewards: list[dict] = giveaway.get("rewards") or []
+    if not rewards:
+        return
+    for winner in winners:
+        for reward in rewards:
+            try:
+                if reward["type"] == "money" and reward.get("amount"):
+                    eco = await api_get_json(f"/economy/players/{winner.id}")
+                    if eco is not None:
+                        new_wallet = (eco.get("wallet") or 0) + reward["amount"]
+                        await api_patch(
+                            f"/economy/players/{winner.id}", {"wallet": new_wallet}
+                        )
+                        logger.info(
+                            "Giveaway reward: +%d wallet → %s",
+                            reward["amount"],
+                            winner.id,
+                        )
+                elif reward["type"] == "role" and reward.get("roleId") and guild:
+                    member = guild.get_member(winner.id) or await guild.fetch_member(
+                        winner.id
+                    )
+                    role = guild.get_role(int(reward["roleId"]))
+                    if role and member:
+                        await member.add_roles(
+                            role, reason=f"Giveaway #{giveaway['id']} reward"
+                        )
+                        logger.info(
+                            "Giveaway reward: role %s → %s", role.name, winner.id
+                        )
+                        dur_min = reward.get("roleDurationMinutes")
+                        if dur_min and isinstance(dur_min, (int, float)):
+                            expires = datetime.now(timezone.utc) + timedelta(
+                                minutes=dur_min
+                            )
+                            await api_post(
+                                "/temporary-roles",
+                                {
+                                    "userId": str(winner.id),
+                                    "guildId": str(guild.id),
+                                    "roleId": str(role.id),
+                                    "expiresAt": expires.isoformat(),
+                                    "reason": f"Giveaway #{giveaway['id']} — {_fmt_duration(dur_min)}",
+                                },
+                            )
+                            logger.info(
+                                "Temp role scheduled: %s → %s (expires in %s)",
+                                role.name,
+                                winner.id,
+                                _fmt_duration(dur_min),
+                            )
+                elif reward["type"] == "item" and reward.get("itemId"):
+                    item_id = reward["itemId"]
+                    # Add to inventory
+                    await api_post(
+                        "/inventory",
+                        {
+                            "userId": str(winner.id),
+                            "itemId": item_id,
+                            "quantity": 1,
+                            "source": "giveaway",
+                        },
+                    )
+                    # Grant associated role if configured
+                    item_data = await api_get_json(f"/shop/items")
+                    if isinstance(item_data, list):
+                        item_obj = next(
+                            (it for it in item_data if it["id"] == item_id), None
+                        )
+                    else:
+                        item_obj = None
+                    if item_obj and item_obj.get("roleId") and guild:
+                        try:
+                            member = guild.get_member(
+                                winner.id
+                            ) or await guild.fetch_member(winner.id)
+                            role = guild.get_role(int(item_obj["roleId"]))
+                            if role and member:
+                                await member.add_roles(
+                                    role,
+                                    reason=f"Giveaway #{giveaway['id']} item reward",
+                                )
+                                logger.info(
+                                    "Giveaway reward: item #%s + role %s → %s",
+                                    item_id,
+                                    role.name,
+                                    winner.id,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not grant role for item #%s: %s", item_id, exc
+                            )
+                    else:
+                        logger.info(
+                            "Giveaway reward: item #%s added to inventory of %s",
+                            item_id,
+                            winner.id,
+                        )
+            except Exception as exc:
+                logger.error(
+                    "Giveaway reward delivery error for %s: %s", winner.id, exc
+                )
 
 
 async def _end_giveaway(giveaway: dict) -> None:
-    giveaway_id = giveaway["id"]
-    channel_id = int(giveaway["channelId"])
-    message_id = int(giveaway["messageId"])
-    winners_count = giveaway["winnersCount"]
+    """Pick winners from reactors, deliver rewards and announce."""
+    giveaway_id = giveaway["id"]
+    channel_id = int(giveaway["channelId"])
+    message_id = int(giveaway["messageId"])
+    winners_count = giveaway["winnersCount"]
 
-    try:
-        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-        message = await channel.fetch_message(message_id)
-    except Exception as exc:
-        logger.error("Giveaway #%d: cannot fetch message: %s", giveaway_id, exc)
-        await api_post(f"/giveaways/{giveaway_id}/end", {"winners": []})
-        return
+    try:
+        channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+    except Exception as exc:
+        logger.error("Giveaway #%d: cannot fetch message: %s", giveaway_id, exc)
+        await api_post(f"/giveaways/{giveaway_id}/end", {"winners": []})
+        return
 
-    raw_reactors: list[discord.User] = []
-    for reaction in message.reactions:
-        if str(reaction.emoji) == GIVEAWAY_EMOJI:
-            async for user in reaction.users():
-                if not user.bot:
-                    raw_reactors.append(user)
-            break
+    # Collect reactors (exclude the bot itself)
+    raw_reactors: list[discord.User] = []
+    for reaction in message.reactions:
+        if str(reaction.emoji) == GIVEAWAY_EMOJI:
+            async for user in reaction.users():
+                if not user.bot:
+                    raw_reactors.append(user)
+            break
 
-    reactors = await _filter_eligible(raw_reactors, message.guild, giveaway)
+    # Apply eligibility conditions
+    reactors = await _filter_eligible(raw_reactors, message.guild, giveaway)
 
-    winners: list[discord.User] = []
-    if reactors:
-        winners = random.sample(reactors, min(winners_count, len(reactors)))
+    winners: list[discord.User] = []
+    if reactors:
+        winners = random.sample(reactors, min(winners_count, len(reactors)))
 
-    winner_ids = [str(w.id) for w in winners]
-    await api_post(f"/giveaways/{giveaway_id}/end", {"winners": winner_ids})
-    await _deliver_rewards(winners, giveaway, message.guild)
+    winner_ids = [str(w.id) for w in winners]
+    await api_post(f"/giveaways/{giveaway_id}/end", {"winners": winner_ids})
 
-    ends_ts = int(datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00")).timestamp())
-    
-    ended_embed = discord.Embed(
-        title="🎊  GIVEAWAY TERMINÉ  🎊",
-        description=(
-            f"**Prix :** {giveaway.get('prize', 'Lot')}\n\n"
-            + (
-                "**🏆 Gagnant(s) :** " + ", ".join(w.mention for w in winners)
-                if winners
-                else "😔 Aucun participant éligible"
-            )
-            + f"\n\n**Fin :** <t:{ends_ts}:f>"
-        ),
-        color=discord.Color.greyple(),
-    )
-    try:
-        await message.edit(embed=ended_embed)
-    except Exception:
-        pass
+    # Deliver rewards
+    await _deliver_rewards(winners, giveaway, message.guild)
 
-    host_ping = f"<@{giveaway['hostId']}> " if giveaway.get("hostId") else ""
-    prize_name = giveaway.get('prize', 'le lot')
-    if winners:
-        mention_str = " ".join(w.mention for w in winners)
-        await channel.send(f"{host_ping}🎉 Félicitations {mention_str} ! Vous avez gagné **{prize_name}** !")
-    else:
-        await channel.send(f"{host_ping}Le giveaway **{prize_name}** s'est terminé sans participants éligibles.")
+    # Update the original embed to show it's ended
+    ends_ts = int(
+        datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00")).timestamp()
+    )
+    rewards: list[dict] = giveaway.get("rewards") or []
+    reward_text = ""
+    if rewards:
+        parts = []
+        for r in rewards:
+            if r["type"] == "money":
+                parts.append(f"💰 {r['amount']:,} pièces")
+            elif r["type"] == "role":
+                parts.append(f"🎭 <@&{r['roleId']}>")
+            elif r["type"] == "item":
+                item_label = r.get("itemName") or f"Item #{r.get('itemId', '?')}"
+                parts.append(f"📦 {item_label}")
+        reward_text = "\n**Récompenses :** " + " · ".join(parts)
 
+    ended_embed = discord.Embed(
+        title="🎊  GIVEAWAY TERMINÉ  🎊",
+        description=(
+            f"**Prix :** {giveaway['prize']}\n\n"
+            + (
+                "**🏆 Gagnant(s) :** " + ", ".join(w.mention for w in winners)
+                if winners
+                else "😔 Aucun participant éligible"
+            )
+            + reward_text
+            + f"\n\n**Fin :** <t:{ends_ts}:f>"
+        ),
+        color=discord.Color.greyple(),
+    )
+    ended_embed.set_footer(text=f"Giveaway #{giveaway_id} — terminé")
+    try:
+        await message.edit(embed=ended_embed)
+    except Exception:
+        pass
 
-# Modals et Vues de Giveaway Interactif existants
-class GiveawayParticipationView(discord.ui.View):
-    def __init__(self, db_data, prize, prize_type, allowed_roles):
-        super().__init__(timeout=None)
-        self.db_data = db_data
-        self.prize = prize
-        self.prize_type = prize_type
-        self.allowed_roles = allowed_roles
-        self.participants = set()
+    # Announce with winner mentions + host ping
+    host_ping = f"<@{giveaway['hostId']}> " if giveaway.get("hostId") else ""
+    if winners:
+        mention_str = " ".join(w.mention for w in winners)
+        await channel.send(
+            f"{host_ping}🎉 Félicitations {mention_str} ! Vous avez gagné **{giveaway['prize']}** !"
+        )
+    else:
+        await channel.send(
+            f"{host_ping}Le giveaway **{giveaway['prize']}** s'est terminé sans participants éligibles."
+        )
 
-    @discord.ui.button(label="🎉 Participer", style=discord.ButtonStyle.green, custom_id="giveaway_join")
-    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_role_names = [role.name for role in interaction.user.roles]
-        user_role_ids = [role.id for role in interaction.user.roles]
-
-        banned_roles = self.db_data.get("banned_roles", [])
-        for banned in banned_roles:
-            if banned in user_role_names:
-                await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer.", ephemeral=True)
-                return
-
-        if self.allowed_roles:
-            has_allowed_role = any(r in user_role_names or r in user_role_ids for r in self.allowed_roles)
-            if not has_allowed_role:
-                await interaction.response.send_message("❌ Tu ne possèdes pas l'un des rôles requis pour participer.", ephemeral=True)
-                return
-
-        if interaction.user.id in self.participants:
-            await interaction.response.send_message("Tu participes déjà à ce giveaway !", ephemeral=True)
-        else:
-            self.participants.add(interaction.user.id)
-            await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
+    logger.info(
+        "Giveaway #%d ended — %d winner(s): %s", giveaway_id, len(winners), winner_ids
+    )
 
 
-class GiveawayEditModal(discord.ui.Modal, title="Modifier le Lot et la Durée"):
-    prize_input = discord.ui.TextInput(label="Lot à gagner", default="Nitro Classic")
-    duration_input = discord.ui.TextInput(label="Durée (en minutes)", default="5")
-
-    def __init__(self, panel_view):
-        super().__init__()
-        self.panel_view = panel_view
-
-    async def on_submit(self, interaction: discord.Interaction):
-        self.panel_view.prize = self.prize_input.value
-        try:
-            self.panel_view.duration = int(self.duration_input.value)
-        except ValueError:
-            self.panel_view.duration = 5
-        await self.panel_view.update_panel(interaction)
-
-
-class GiveawayPanel(discord.ui.View):
-    def __init__(self, interaction: discord.Interaction):
-        super().__init__(timeout=180)
-        self.interaction = interaction
-        self.prize = "Nitro Classic"
-        self.duration = 5
-        self.prize_type = "Argent (Coins)"
-        self.ping_role = None
-        self.allowed_role = None
-
-    async def update_panel(self, interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="⚙️ Panneau de Configuration - Giveaway",
-            description="Personnalisez les paramètres, puis cliquez sur **Lancer**.",
-            color=discord.Color.blurple()
-        )
-        embed.add_field(name="🎁 Lot", value=f"`{self.prize}`", inline=True)
-        embed.add_field(name="⏱️ Durée", value=f"`{self.duration} minute(s)`", inline=True)
-        embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
-        embed.add_field(name="🔔 Rôle mentionné", value=self.ping_role.mention if self.ping_role else "`Aucun`", inline=True)
-        embed.add_field(name="🛡️ Rôle requis", value=self.allowed_role.mention if self.allowed_role else "`Aucun`", inline=True)
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="✏️ Modifier Lot & Durée", style=discord.ButtonStyle.primary, row=0)
-    async def edit_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(GiveawayEditModal(self))
-
-    @discord.ui.select(
-        placeholder="Choisir le type de prix...",
-        row=1,
-        options=[
-            discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
-            discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
-            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire"),
-            discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
-            discord.SelectOption(label="Item / Autre", description="Autre type de lot")
-        ]
-    )
-    async def select_prize_type(self, interaction: discord.Interaction, select: discord.ui.Select):
-        self.prize_type = select.values[0]
-        await self.update_panel(interaction)
-
-    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choisir un rôle à mentionner...", row=2, min_values=0, max_values=1)
-    async def select_ping_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
-        self.ping_role = select.values[0] if select.values else None
-        await self.update_panel(interaction)
-
-    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Choisir un rôle requis...", row=3, min_values=0, max_values=1)
-    async def select_allowed_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
-        self.allowed_role = select.values[0] if select.values else None
-        await self.update_panel(interaction)
-
-    @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=4)
-    async def launch_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            with open("data.json", "r", encoding="utf-8") as f:
-                db_data = json.load(f)
-        except FileNotFoundError:
-            db_data = {"permissions": {}, "banned_roles": []}
-
-        embed = discord.Embed(
-            title="🎉 GIVEAWAY 🎉",
-            description=f"🎁 **Lot :** {self.prize}\n"
-                        f"📌 **Type :** {self.prize_type}\n"
-                        f"⏱️ **Durée :** {self.duration} minute(s)\n"
-                        f"{f'🛡️ **Rôle requis :** {self.allowed_role.mention}' if self.allowed_role else ''}\n\n"
-                        f"Clique sur le bouton **🎉 Participer** ci-dessous !",
-            color=discord.Color.blue()
-        )
-
-        allowed_roles_list = [self.allowed_role.name] if self.allowed_role else []
-        view = GiveawayParticipationView(db_data, self.prize, self.prize_type, allowed_roles_list)
-        content_to_send = self.ping_role.mention if self.ping_role else None
-        
-        await interaction.message.delete()
-        message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
+@tasks.loop(seconds=30)
+async def giveaway_poll_loop() -> None:
+    """Post pending giveaway embeds and end expired ones."""
+    active = await api_get_list("/giveaways?status=active")
+    if not active:
+        return
+    now = datetime.now(timezone.utc)
+    for giveaway in active:
+        # Post embed if not yet posted
+        if not giveaway.get("messageId"):
+            await _post_giveaway_embed(giveaway)
+            continue
+        # End if expired
+        ends_at = datetime.fromisoformat(giveaway["endsAt"].replace("Z", "+00:00"))
+        if now >= ends_at:
+            await _end_giveaway(giveaway)
 
 
-# ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
+@giveaway_poll_loop.before_loop
+async def before_giveaway_poll() -> None:
+    await bot.wait_until_ready()
 
-async def handle_leveling(message: discord.Message):
-    if message.author.bot:
-        return
 
-    user_id = message.author.id
-    if user_id not in user_levels:
-        user_levels[user_id] = {"xp": 0, "level": 1}
+@tasks.loop(minutes=1)
+async def temp_role_poll_loop() -> None:
+    """Remove expired temporary roles."""
+    pending = await api_get_list("/temporary-roles/pending")
+    if not pending:
+        return
+    for entry in pending:
+        try:
+            guild = bot.get_guild(int(entry["guildId"]))
+            if guild is None:
+                guild = await bot.fetch_guild(int(entry["guildId"]))
+            member = guild.get_member(int(entry["userId"]))
+            if member is None:
+                member = await guild.fetch_member(int(entry["userId"]))
+            role = guild.get_role(int(entry["roleId"]))
+            if role and member and role in member.roles:
+                await member.remove_roles(
+                    role, reason=f"Rôle temporaire expiré (entrée #{entry['id']})"
+                )
+                logger.info(
+                    "Temp role #%s expired: removed %s from %s",
+                    entry["id"],
+                    role.name,
+                    member,
+                )
+        except Exception as exc:
+            logger.warning("Temp role #%s removal error: %s", entry["id"], exc)
+        # Always mark as removed so we don't retry indefinitely
+        await api_patch(f"/temporary-roles/{entry['id']}/removed", {})
 
-    xp_gain = random.randint(15, 25)
-    user_levels[user_id]["xp"] += xp_gain
 
-    current_data = user_levels[user_id]
-    current_level = current_data["level"]
-    current_xp = current_data["xp"]
-    xp_needed = current_level * 100
-
-    if current_xp >= xp_needed:
-        current_data["level"] += 1
-        current_data["xp"] = 0
-        await message.channel.send(
-            f"🎉 Félicitations {message.author.mention} ! Tu passes au niveau **{current_data['level']}** !"
-        )
+@temp_role_poll_loop.before_loop
+async def before_temp_role_poll() -> None:
+    await bot.wait_until_ready()
 
 
 # ── 4. COMMANDES SLASH (JEUX & ÉCONOMIE & NIVEAUX) ───────────────────────────
