@@ -282,7 +282,7 @@ async def giveaway(
     allowed_roles_list = [allowed_role.name] if allowed_role else []
 
     embed = discord.Embed(
-        title="🎉 GIBEAWAY 🎉",
+        title="🎉 GIVEAWAY 🎉",
         description=f"🎁 **Lot :** {prize}\n"
                     f"📌 **Type :** {prize_type.replace('_', ' ').capitalize()}\n"
                     f"⏱️ **Durée :** {duration} minute(s)\n"
