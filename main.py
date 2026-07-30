@@ -5,6 +5,8 @@ import threading
 from discord import app_commands
 from discord.ext import commands
 from dashboard import run_dashboard
+from discord.ext import tasks
+from dashboard import reminders_db
 
 # ── 1. CONFIGURATION DES INTENTS & DU BOT ──────────────────────────────────────
 
