@@ -18,5 +18,9 @@
             "role_name": "time to drink water",
             "interval_minutes": 90
         }
+    },
+    "level_config": {
+        "xp_multiplier": 1.0,
+        "money_per_level": 1000
     }
 }
