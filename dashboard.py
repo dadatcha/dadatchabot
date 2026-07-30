@@ -171,18 +171,24 @@ def sync_discord():
 def sync_github():
     global sync_status
     try:
-        # 1. Force la récupération des dernières données depuis GitHub
+        # Vérifie si le dossier .git existe, sinon l'initialise
+        if not os.path.isdir(".git"):
+            subprocess.run(["git", "init"], capture_output=True, text=True, check=True)
+            # Remplace l'URL ci-dessous par l'URL HTTPS de ton propre dépôt GitHub (ex: https://github.com/ton-pseudo/ton-repo.git)
+            repo_url = os.environ.get("GITHUB_REPO_URL", "https://github.com/TON_PSEUDO/TON_REPO.git")
+            subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
+
+        # Force la configuration de la branche et récupère les codes
         subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True, timeout=10)
-        
-        # 2. Force le pull sur la branche principale (remplace 'main' par 'master' si ton dépôt utilise master)
+        subprocess.run(["git", "branch", "-M", "main"], capture_output=True, text=True)
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, timeout=10)
         
         if result.returncode == 0:
-            sync_status = "Mise à jour GitHub réussie (Git Pull origin main exécuté)."
+            sync_status = "Mise à jour GitHub réussie (Git Pull effectué)."
         else:
             sync_status = f"Erreur Git : {result.stderr.strip()}"
     except Exception as e:
-        sync_status = f"Impossible d'exécuter le git pull : {e}"
+        sync_status = f"Impossible d'exécuter la synchro GitHub : {e}"
     return redirect(url_for("index"))
 
 @app.route("/sync/render", methods=["POST"])
