@@ -24,8 +24,15 @@ default_data = {
         "addmoney": "admin",
         "removemoney": "admin",
         "setlevel": "admin",
-        "reminders": "everyone"
+        "reminders": "admin",
+        "add": "admin",
+        "delete": "admin",
+        "toggle": "admin",
+        "sync": "admin",
+        "custom_command": "admin",
+        "levels": "admin"
     },
+    "banned_roles": [],
     "reminders": {},
     "level_config": {
         "xp_per_message": 15,
@@ -95,6 +102,7 @@ def save_data(data):
 
 db = load_data()
 command_permissions = db.get("permissions", default_data["permissions"])
+banned_roles = db.get("banned_roles", [])
 raw_reminders = db.get("reminders", {})
 reminders_db = {int(k): v for k, v in raw_reminders.items() if str(k).isdigit()}
 level_config = db.get("level_config", default_data["level_config"])
@@ -133,6 +141,7 @@ DASHBOARD_TEMPLATE = """
         form.inline-form { display: inline; }
         .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
         .form-grid-2 { margin-top: 15px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 10px; }
+        .form-grid-role { margin-top: 15px; display: grid; grid-template-columns: 3fr 1fr; gap: 10px; }
         input, select { padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
         .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
         .alert { padding: 12px; border-radius: 6px; margin-bottom: 20px; background-color: #334155; color: #38bdf8; border: 1px solid #38bdf8; }
@@ -206,7 +215,34 @@ DASHBOARD_TEMPLATE = """
             </div>
         </form>
 
-        <h2>🛡️ Gestion des Permissions des Commandes</h2>
+        <h2>🚫 Rôles Interdits à l'Usage des Commandes</h2>
+        <table>
+            <tr><th>Nom du Rôle Interdit</th><th>Action</th></tr>
+            {% if banned_roles %}
+                {% for role in banned_roles %}
+                <tr>
+                    <td><strong>@{{ role }}</strong></td>
+                    <td>
+                        <form action="/banned-role/delete" method="POST" class="inline-form">
+                            <input type="hidden" name="role_name" value="{{ role }}">
+                            <button type="submit" class="btn btn-delete">Autoriser à nouveau</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td colspan="2" style="text-align: center; color: #94a3b8;">Aucun rôle interdit configuré.</td></tr>
+            {% endif %}
+        </table>
+
+        <form action="/banned-role/add" method="POST">
+            <div class="form-grid-role">
+                <input type="text" name="role_name" placeholder="Nom du rôle à interdire (ex: Mute, Visiteur)" required>
+                <button type="submit" class="btn btn-add" style="margin-top:0;">🚫 Interdire ce Rôle</button>
+            </div>
+        </form>
+
+        <h2>🛡️ Gestion des Permissions des Commandes (Actuelles et Futures)</h2>
         <table>
             <tr><th>Commande</th><th>Permission Actuelle</th><th>Action / Bascule</th></tr>
             {% for cmd, perm in permissions.items() %}
@@ -267,7 +303,8 @@ def index():
     sync_status = None
     return render_template_string(
         DASHBOARD_TEMPLATE, 
-        permissions=command_permissions, 
+        permissions=command_permissions,
+        banned_roles=banned_roles,
         reminders=reminders_db, 
         level_config=level_config,
         custom_commands=custom_commands,
@@ -306,6 +343,10 @@ def add_custom_command():
                 "add_money": add_money
             }
             db["custom_commands"] = custom_commands
+            # S'assurer que la nouvelle commande a une permission par défaut
+            if cmd_name not in command_permissions:
+                command_permissions[cmd_name] = "admin"
+                db["permissions"] = command_permissions
             save_data(db)
     except ValueError:
         pass
@@ -316,6 +357,29 @@ def delete_custom_command(cmd_name):
     if cmd_name in custom_commands:
         del custom_commands[cmd_name]
         db["custom_commands"] = custom_commands
+        if cmd_name in command_permissions:
+            del command_permissions[cmd_name]
+            db["permissions"] = command_permissions
+        save_data(db)
+    return redirect(url_for("index"))
+
+@app.route("/banned-role/add", methods=["POST"])
+def add_banned_role():
+    global banned_roles
+    role_name = request.form.get("role_name", "").strip().lstrip("@")
+    if role_name and role_name not in banned_roles:
+        banned_roles.append(role_name)
+        db["banned_roles"] = banned_roles
+        save_data(db)
+    return redirect(url_for("index"))
+
+@app.route("/banned-role/delete", methods=["POST"])
+def delete_banned_role():
+    global banned_roles
+    role_name = request.form.get("role_name", "").strip().lstrip("@")
+    if role_name in banned_roles:
+        banned_roles.remove(role_name)
+        db["banned_roles"] = banned_roles
         save_data(db)
     return redirect(url_for("index"))
 
