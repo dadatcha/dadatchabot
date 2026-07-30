@@ -318,6 +318,89 @@ async def casino(interaction: discord.Interaction, bet: int):
 
     await interaction.response.send_message(embed=embed)
 
+# ── COMMANDES ADMINISTRATEUR (ÉCONOMIE & NIVEAUX) ─────────────────────────────
+
+@bot.tree.command(name="addmoney", description="[ADMIN] Ajoute des coins à l'argent d'un membre")
+@app_commands.describe(member="Le membre ciblé", amount="Le montant à ajouter")
+async def add_money(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    user_balances[user_id]["wallet"] += amount
+
+    embed = discord.Embed(
+        title="💰 Gestion de l'argent (Ajout)",
+        description=f"✅ **{amount}** coins ont été ajoutés au portefeuille de {member.mention}.\n"
+                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="removemoney", description="[ADMIN] Retire des coins à l'argent d'un membre")
+@app_commands.describe(member="Le membre ciblé", amount="Le montant à retirer")
+async def remove_money(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ Le montant doit être supérieur à 0.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    # Empêche le portefeuille de passer en négatif
+    if user_balances[user_id]["wallet"] < amount:
+        user_balances[user_id]["wallet"] = 0
+    else:
+        user_balances[user_id]["wallet"] -= amount
+
+    embed = discord.Embed(
+        title="💰 Gestion de l'argent (Retrait)",
+        description=f"⚠️ **{amount}** coins ont été retirés du portefeuille de {member.mention}.\n"
+                    f"Nouveau solde : **{user_balances[user_id]['wallet']}** coins.",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="setlevel", description="[ADMIN] Modifie directement le niveau d'un membre")
+@app_commands.describe(member="Le membre ciblé", level_num="Le nouveau niveau")
+async def set_level(interaction: discord.Interaction, member: discord.Member, level_num: int):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ Tu dois être administrateur pour utiliser cette commande.", ephemeral=True)
+        return
+
+    if level_num < 1:
+        await interaction.response.send_message("❌ Le niveau minimum est 1.", ephemeral=True)
+        return
+
+    user_id = member.id
+    if user_id not in user_levels:
+        user_levels[user_id] = {"xp": 0, "level": 1}
+
+    user_levels[user_id]["level"] = level_num
+    user_levels[user_id]["xp"] = 0  # Remet l'XP à 0 pour repartir sur de bonnes bases
+
+    embed = discord.Embed(
+        title="📊 Gestion des Niveaux",
+        description=f"✅ Le niveau de {member.mention} a été défini à **{level_num}** (XP réinitialisée à 0).",
+        color=discord.Color.purple()
+    )
+    await interaction.response.send_message(embed=embed)
+
 
 # ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
 
