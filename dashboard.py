@@ -28,6 +28,7 @@ default_data = {
     },
     "reminders": {},
     "level_config": {
+        "xp_per_message": 15,
         "xp_multiplier": 1.0,
         "money_per_level": 100
     },
@@ -130,7 +131,7 @@ DASHBOARD_TEMPLATE = """
         .btn-sync-render { background-color: #46e3b7; color: #0f172a; }
         .btn:hover { opacity: 0.9; }
         form.inline-form { display: inline; }
-        .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+        .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
         .form-grid-2 { margin-top: 15px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 10px; }
         input, select { padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
         .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
@@ -156,11 +157,15 @@ DASHBOARD_TEMPLATE = """
         <form action="/levels/config" method="POST">
             <div class="form-grid">
                 <div>
+                    <label>XP gagné par message :</label>
+                    <input type="number" name="xp_per_message" value="{{ level_config.xp_per_message }}" required>
+                </div>
+                <div>
                     <label>Multiplicateur d'XP :</label>
                     <input type="number" step="0.1" name="xp_multiplier" value="{{ level_config.xp_multiplier }}" required>
                 </div>
                 <div>
-                    <label>Argent gagné par niveau :</label>
+                    <label>Argent par niveau :</label>
                     <input type="number" name="money_per_level" value="{{ level_config.money_per_level }}" required>
                 </div>
                 <div style="display: flex; align-items: flex-end;">
@@ -273,8 +278,10 @@ def index():
 def update_levels_config():
     global level_config
     try:
+        xp_msg = int(request.form.get("xp_per_message", 15))
         xp_mult = float(request.form.get("xp_multiplier", 1.0))
         money_lvl = int(request.form.get("money_per_level", 100))
+        level_config["xp_per_message"] = xp_msg
         level_config["xp_multiplier"] = xp_mult
         level_config["money_per_level"] = money_lvl
         db["level_config"] = level_config
