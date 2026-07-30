@@ -1,10 +1,9 @@
-from flask import Flask, render_template_string, request, redirect, url_for
-import threading
+import os
+from flask import Flask, render_template_string, redirect, url_for
 
 app = Flask(__name__)
 
-# Dictionnaire de configuration des permissions (Commande -> "admin" ou "everyone")
-# Plus tard, tu pourras stocker ça dans une base de données
+# Dictionnaire de configuration des permissions
 command_permissions = {
     "startguess": "admin",
     "higherlower": "everyone",
@@ -14,7 +13,6 @@ command_permissions = {
     "level": "everyone"
 }
 
-# Template HTML simple et moderne intégré directement pour l'exemple
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="fr">
@@ -78,7 +76,6 @@ def index():
 @app.route("/toggle/<cmd_name>", methods=["POST"])
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
-        # Alterne entre 'admin' et 'everyone'
         if command_permissions[cmd_name] == "admin":
             command_permissions[cmd_name] = "everyone"
         else:
@@ -86,7 +83,5 @@ def toggle_permission(cmd_name):
     return redirect(url_for("index"))
 
 def run_dashboard():
-    # Render écoute généralement sur le port 10000 ou via la variable d'environnement PORT
-    import os
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
