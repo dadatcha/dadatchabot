@@ -1,16 +1,14 @@
 import os
 import json
 import urllib.request
+import urllib.error
 import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-# Configuration JSONBin.io
+# Configuration JSONBin.io via variables d'environnement
 JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "")
-# Identifiants des Bins (laissés vides au départ, ils seront créés automatiquement)
-PERMS_BIN_ID = os.environ.get("PERMS_BIN_ID", "")
-REMINDERS_BIN_ID = os.environ.get("REMINDERS_BIN_ID", "")
 
 # Dictionnaire par défaut des permissions
 default_permissions = {
@@ -26,23 +24,31 @@ default_permissions = {
     "reminders": "everyone"
 }
 
-# --- FONCTIONS JSONBIN ---
-def jsonbin_get(bin_id, default_data):
+# --- FONCTIONS DE LECTURE ET SAUVEGARDE JSONBIN ---
+def jsonbin_get(env_var_name, default_data):
+    bin_id = os.environ.get(env_var_name, "").strip()
     if not bin_id or not JSONBIN_API_KEY:
+        print(f"[INFO] {env_var_name} ou JSONBIN_API_KEY manquant. Utilisation des données par défaut.")
         return default_data
     try:
         url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
         req = urllib.request.Request(url, headers={"X-Master-Key": JSONBIN_API_KEY})
         with urllib.request.urlopen(req) as response:
             data = json.loads(response.read().decode())
+            print(f"[SUCCES GET] Données chargées depuis {env_var_name}")
             return data.get("record", default_data)
     except Exception as e:
-        print(f"[ERREUR JSONBin GET] : {e}")
+        print(f"[ERREUR GET] Impossible de lire {env_var_name} : {e}")
         return default_data
 
-def jsonbin_save(bin_id, data):
+def jsonbin_save(env_var_name, data):
+    bin_id = os.environ.get(env_var_name, "").strip()
+    print(f"[DEBUG] Tentative de sauvegarde sur {env_var_name} (ID: '{bin_id}')")
+    
     if not bin_id or not JSONBIN_API_KEY:
+        print(f"[ERREUR] Impossible de sauvegarder : {env_var_name} ou JSONBIN_API_KEY est vide sur Render.")
         return
+        
     try:
         url = f"https://api.jsonbin.io/v3/b/{bin_id}"
         payload = json.dumps(data).encode("utf-8")
@@ -50,17 +56,22 @@ def jsonbin_save(bin_id, data):
             "Content-Type": "application/json",
             "X-Master-Key": JSONBIN_API_KEY
         }, method="PUT")
+        
         with urllib.request.urlopen(req) as response:
-            print("[DEBUG] Sauvegarde JSONBin réussie")
+            response_body = response.read().decode()
+            print(f"[SUCCES SAVE] Sauvegarde réussie sur {env_var_name} ! Réponse JSONBin : {response_body}")
+            
+    except urllib.error.HTTPError as e:
+        error_details = e.read().decode()
+        print(f"[ERREUR HTTP {e.code}] Echec de sauvegarde sur {env_var_name} : {error_details}")
     except Exception as e:
-        print(f"[ERREUR JSONBin SAVE] : {e}")
+        print(f"[ERREUR CRITIQUE] Echec de sauvegarde sur {env_var_name} : {e}")
 
-# --- CHARGEMENT DES DONNÉES ---
-command_permissions = jsonbin_get(PERMS_BIN_ID, default_permissions.copy())
+# --- CHARGEMENT INITIAL DES DONNÉES ---
+command_permissions = jsonbin_get("PERMS_BIN_ID", default_permissions.copy())
 
-raw_reminders = jsonbin_get(REMINDERS_BIN_ID, {})
-# Convertit les clés en int (car JSON convertit tout en string)
-reminders_db = {int(k): v for k, v in raw_reminders.items()}
+raw_reminders = jsonbin_get("REMINDERS_BIN_ID", {})
+reminders_db = {int(k): v for k, v in raw_reminders.items() if str(k).isdigit()}
 
 if reminders_db:
     reminder_counter = max(reminders_db.keys()) + 1
@@ -69,6 +80,7 @@ else:
 
 sync_status = None
 
+# --- TEMPLATE HTML DU DASHBOARD ---
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="fr">
@@ -168,6 +180,7 @@ DASHBOARD_TEMPLATE = """
 </html>
 """
 
+# --- ROUTES FLASK ---
 @app.route("/")
 def index():
     global sync_status
@@ -179,7 +192,7 @@ def index():
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
         command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
-        jsonbin_save(PERMS_BIN_ID, command_permissions)
+        jsonbin_save("PERMS_BIN_ID", command_permissions)
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
@@ -199,9 +212,8 @@ def add_reminder():
                 "interval_minutes": int(interval)
             }
             reminder_counter += 1
-            # Sauvegarde JSONBin (convertit les clés int en str pour le JSON)
             data_to_save = {str(k): v for k, v in reminders_db.items()}
-            jsonbin_save(REMINDERS_BIN_ID, data_to_save)
+            jsonbin_save("REMINDERS_BIN_ID", data_to_save)
         except ValueError:
             pass
     return redirect(url_for("index"))
@@ -211,7 +223,7 @@ def delete_reminder(r_id):
     if r_id in reminders_db:
         del reminders_db[r_id]
         data_to_save = {str(k): v for k, v in reminders_db.items()}
-        jsonbin_save(REMINDERS_BIN_ID, data_to_save)
+        jsonbin_save("REMINDERS_BIN_ID", data_to_save)
     return redirect(url_for("index"))
 
 @app.route("/sync/discord", methods=["POST"])
