@@ -1,10 +1,16 @@
 import os
 import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
+import json
+import subprocess
 
 app = Flask(__name__)
 
-command_permissions = {
+# Fichiers de sauvegarde persistante
+PERMS_FILE = "permissions.json"
+
+# Dictionnaire par défaut
+default_permissions = {
     "startguess": "admin",
     "higherlower": "everyone",
     "roulette": "everyone",
@@ -16,6 +22,27 @@ command_permissions = {
     "setlevel": "admin",
     "reminders": "everyone"
 }
+
+# Fonction pour charger les permissions (depuis le fichier s'il existe, sinon par défaut)
+def load_permissions():
+    if os.path.exists(PERMS_FILE):
+        try:
+            with open(PERMS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default_permissions.copy()
+
+# Fonction pour sauvegarder les permissions dans le fichier
+def save_permissions(perms):
+    try:
+        with open(PERMS_FILE, "w", encoding="utf-8") as f:
+            json.dump(perms, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Erreur lors de la sauvegarde des permissions : {e}")
+
+# Charger les permissions au démarrage
+command_permissions = load_permissions()
 
 # Stockage des rappels : id -> {"title": str, "channel_id": int, "role_name": str, "interval_minutes": int}
 reminders_db = {}
