@@ -21,7 +21,8 @@
     },
     "level_config": {
         "xp_multiplier": 1.0,
-        "money_per_level": 1000
+        "money_per_level": 1000,
+        "xp_per_message": 0
     },
     "custom_commands": {
         "vouch": {
