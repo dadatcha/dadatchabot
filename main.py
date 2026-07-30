@@ -204,9 +204,62 @@ async def on_message(message: discord.Message):
     
     # Laisse passer les autres commandes
     await bot.process_commands(message)
+@bot.tree.command(name="higherlower", description="Parie des coins sur un jeu de Higher/Lower")
+@app_commands.describe(bet="Montant de ta mise", choice="Choisis 'higher' (plus haut) ou 'lower' (plus bas)")
+@app_commands.choices(choice=[
+    app_commands.Choice(name="Plus haut (Higher)", value="higher"),
+    app_commands.Choice(name="Plus bas (Lower)", value="lower")
+])
+async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
+    user_id = interaction.user.id
 
+    # Vérification du solde
+    if user_id not in user_balances:
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
+
+    if bet <= 0:
+        await interaction.response.send_message("❌ La mise doit être supérieure à 0.", ephemeral=True)
+        return
+
+    if user_balances[user_id]["wallet"] < bet:
+        await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
+        return
+
+    # Déduction de la mise
+    user_balances[user_id]["wallet"] -= bet
+
+    # Génération des nombres (entre 1 et 100)
+    base_number = random.randint(1, 50)
+    secret_number = random.randint(1, 100)
+
+    # Résolution
+    won = False
+    if choice == "higher" and secret_number > base_number:
+        won = True
+    elif choice == "lower" and secret_number < base_number:
+        won = True
+
+    embed = discord.Embed(
+        title="🎲 Higher / Lower",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Nombre de base", value=f"**{base_number}**", inline=True)
+    embed.add_field(name="Ton choix", value=f"**{choice.upper()}**", inline=True)
+    embed.add_field(name="Nombre mystère", value=f"**{secret_number}**", inline=False)
+
+    if won:
+        winnings = bet * 2
+        user_balances[user_id]["wallet"] += winnings
+        embed.description = f"🎉 Gagné ! Tu remportes **{winnings}** coins !"
+        embed.color = discord.Color.green()
+    else:
+        embed.description = f"😢 Perdu ! Tu as perdu ta mise de **{bet}** coins."
+        embed.color = discord.Color.red()
+
+    await interaction.response.send_message(embed=embed)
 
 # ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     bot.run(os.environ.get("DISCORD_TOKEN"))
+    
