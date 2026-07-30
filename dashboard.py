@@ -4,7 +4,6 @@ from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-# Dictionnaire de configuration des permissions des commandes
 command_permissions = {
     "startguess": "admin",
     "higherlower": "everyone",
@@ -18,11 +17,9 @@ command_permissions = {
     "reminders": "everyone"
 }
 
-# Stockage en mémoire des rappels
+# Stockage des rappels : id -> {"title": str, "channel_id": int, "role_name": str, "interval_minutes": int}
 reminders_db = {}
 reminder_counter = 1
-
-# Variable pour stocker le dernier statut des actions
 sync_status = None
 
 DASHBOARD_TEMPLATE = """
@@ -33,7 +30,7 @@ DASHBOARD_TEMPLATE = """
     <title>Dashboard Bot Discord</title>
     <style>
         body { font-family: Arial, sans-serif; background-color: #0f172a; color: #f8fafc; margin: 0; padding: 40px; }
-        .container { max-width: 900px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .container { max-width: 1000px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         h1, h2 { color: #38bdf8; text-align: center; }
         h2 { text-align: left; border-bottom: 2px solid #334155; padding-bottom: 10px; margin-top: 40px; }
         table { width: 100%; margin-top: 20px; border-collapse: collapse; }
@@ -43,14 +40,14 @@ DASHBOARD_TEMPLATE = """
         .btn-admin { background-color: #ef4444; color: white; }
         .btn-everyone { background-color: #22c55e; color: white; }
         .btn-delete { background-color: #ef4444; color: white; }
-        .btn-add { background-color: #38bdf8; color: #0f172a; margin-top: 10px; }
+        .btn-add { background-color: #38bdf8; color: #0f172a; margin-top: 15px; width: 100%; }
         .btn-sync-discord { background-color: #5865F2; color: white; }
         .btn-sync-github { background-color: #24292e; color: white; }
         .btn-sync-render { background-color: #46e3b7; color: #0f172a; }
         .btn:hover { opacity: 0.9; }
         form.inline-form { display: inline; }
-        .form-group { margin-top: 15px; display: flex; gap: 10px; }
-        input[type="text"] { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; }
+        .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+        input, select { padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
         .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
         .alert { padding: 12px; border-radius: 6px; margin-bottom: 20px; background-color: #334155; color: #38bdf8; border: 1px solid #38bdf8; }
     </style>
@@ -60,75 +57,44 @@ DASHBOARD_TEMPLATE = """
         <h1>⚙️ Dashboard de Configuration</h1>
 
         {% if message %}
-        <div class="alert">
-            ⚡ <strong>Statut :</strong> {{ message }}
-        </div>
+        <div class="alert">⚡ <strong>Statut :</strong> {{ message }}</div>
         {% endif %}
 
-        <!-- SECTION 0 : SYNCHRONISATION GLOBALE -->
         <h2>🔄 Centre de Synchronisation</h2>
-        <p>Exécute des actions de mise à jour et de synchronisation instantanées :</p>
         <div class="sync-container">
-            <form action="/sync/discord" method="POST">
-                <button type="submit" class="btn btn-sync-discord">🤖 Re-sync Discord (Commandes)</button>
-            </form>
-            <form action="/sync/github" method="POST">
-                <button type="submit" class="btn btn-sync-github">📂 Re-sync Script GitHub</button>
-            </form>
-            <form action="/sync/render" method="POST">
-                <button type="submit" class="btn btn-sync-render">🚀 Redéployer (Render)</button>
-            </form>
+            <form action="/sync/discord" method="POST"><button type="submit" class="btn btn-sync-discord">🤖 Re-sync Discord</button></form>
+            <form action="/sync/github" method="POST"><button type="submit" class="btn btn-sync-github">📂 Re-sync Script GitHub</button></form>
+            <form action="/sync/render" method="POST"><button type="submit" class="btn btn-sync-render">🚀 Redéployer (Render)</button></form>
         </div>
         
-        <!-- SECTION 1 : PERMISSIONS -->
         <h2>🛡️ Gestion des Permissions des Commandes</h2>
-        <p>Gère les permissions des commandes de ton bot en un clic :</p>
         <table>
-            <tr>
-                <th>Commande</th>
-                <th>Permission Actuelle</th>
-                <th>Action / Bascule</th>
-            </tr>
+            <tr><th>Commande</th><th>Permission Actuelle</th><th>Action / Bascule</th></tr>
             {% for cmd, perm in permissions.items() %}
             <tr>
                 <td><strong>/{{ cmd }}</strong></td>
-                <td>
-                    {% if perm == 'admin' %}
-                        <span style="color: #ef4444;">🛡️ Administrateurs uniquement</span>
-                    {% else %}
-                        <span style="color: #22c55e;">🌐 Tous les membres</span>
-                    {% endif %}
-                </td>
+                <td>{% if perm == 'admin' %}<span style="color: #ef4444;">🛡️ Admin uniquement</span>{% else %}<span style="color: #22c55e;">🌐 Tous</span>{% endif %}</td>
                 <td>
                     <form action="/toggle/{{ cmd }}" method="POST" class="inline-form">
-                        {% if perm == 'admin' %}
-                            <button type="submit" class="btn btn-everyone">Rendre public</button>
-                        {% else %}
-                            <button type="submit" class="btn btn-admin">Restreindre Admin</button>
-                        {% endif %}
+                        {% if perm == 'admin' %}<button type="submit" class="btn btn-everyone">Rendre public</button>
+                        {% else %}<button type="submit" class="btn btn-admin">Restreindre Admin</button>{% endif %}
                     </form>
                 </td>
             </tr>
             {% endfor %}
         </table>
 
-        <!-- SECTION 2 : RAPPELS (REMINDERS) -->
-        <h2>⏰ Gestion des Rappels (Reminders)</h2>
-        <p>Crée et consulte les rappels enregistrés :</p>
-        
+        <h2>⏰ Configuration des Rappels Automatiques</h2>
         <table>
-            <tr>
-                <th>ID</th>
-                <th>Titre du Rappel</th>
-                <th>Horaire / Date</th>
-                <th>Action</th>
-            </tr>
+            <tr><th>ID</th><th>Message / Titre</th><th>ID du Salon</th><th>Rôle visé</th><th>Intervalle</th><th>Action</th></tr>
             {% if reminders %}
                 {% for r_id, r_data in reminders.items() %}
                 <tr>
                     <td>#{{ r_id }}</td>
                     <td><strong>{{ r_data.title }}</strong></td>
-                    <td>{{ r_data.time }}</td>
+                    <td><code>{{ r_data.channel_id }}</code></td>
+                    <td>@{{ r_data.role_name }}</td>
+                    <td>Toutes les <strong>{{ r_data.interval_minutes }} min</strong></td>
                     <td>
                         <form action="/reminder/delete/{{ r_id }}" method="POST" class="inline-form">
                             <button type="submit" class="btn btn-delete">Supprimer</button>
@@ -137,16 +103,18 @@ DASHBOARD_TEMPLATE = """
                 </tr>
                 {% endfor %}
             {% else %}
-                <tr>
-                    <td colspan="4" style="text-align: center; color: #94a3b8;">Aucun rappel pour le moment.</td>
-                </tr>
+                <tr><td colspan="6" style="text-align: center; color: #94a3b8;">Aucun rappel configuré.</td></tr>
             {% endif %}
         </table>
 
-        <form action="/reminder/add" method="POST" class="form-group">
-            <input type="text" name="title" placeholder="Titre du rappel (ex: Lancer un stream)" required>
-            <input type="text" name="time" placeholder="Horaire (ex: Ce soir à 20h)" required>
-            <button type="submit" class="btn btn-add">Ajouter un rappel</button>
+        <form action="/reminder/add" method="POST">
+            <div class="form-grid">
+                <input type="text" name="title" placeholder="Message du rappel" required>
+                <input type="text" name="channel_id" placeholder="ID du salon Discord" required>
+                <input type="text" name="role_name" placeholder="Nom du rôle à mentionner" required>
+                <input type="number" name="interval_minutes" placeholder="Intervalle (en minutes)" min="1" required>
+            </div>
+            <button type="submit" class="btn btn-add">➕ Ajouter et Activer le Rappel</button>
         </form>
     </div>
 </body>
@@ -157,26 +125,34 @@ DASHBOARD_TEMPLATE = """
 def index():
     global sync_status
     msg = sync_status
-    sync_status = None # Réinitialise le message après affichage
+    sync_status = None
     return render_template_string(DASHBOARD_TEMPLATE, permissions=command_permissions, reminders=reminders_db, message=msg)
 
 @app.route("/toggle/<cmd_name>", methods=["POST"])
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
-        if command_permissions[cmd_name] == "admin":
-            command_permissions[cmd_name] = "everyone"
-        else:
-            command_permissions[cmd_name] = "admin"
+        command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
 def add_reminder():
     global reminder_counter
     title = request.form.get("title")
-    time_str = request.form.get("time")
-    if title and time_str:
-        reminders_db[reminder_counter] = {"title": title, "time": time_str}
-        reminder_counter += 1
+    channel_id = request.form.get("channel_id")
+    role_name = request.form.get("role_name")
+    interval = request.form.get("interval_minutes")
+    
+    if title and channel_id and role_name and interval:
+        try:
+            reminders_db[reminder_counter] = {
+                "title": title,
+                "channel_id": int(channel_id),
+                "role_name": role_name.strip("@"),
+                "interval_minutes": int(interval)
+            }
+            reminder_counter += 1
+        except ValueError:
+            pass
     return redirect(url_for("index"))
 
 @app.route("/reminder/delete/<int:r_id>", methods=["POST"])
@@ -185,45 +161,35 @@ def delete_reminder(r_id):
         del reminders_db[r_id]
     return redirect(url_for("index"))
 
-# --- ROUTES DE SYNCHRONISATION ---
-
 @app.route("/sync/discord", methods=["POST"])
 def sync_discord():
     global sync_status
-    # Note : Le vrai sync des commandes s'effectue dans main.py lors du on_ready. 
-    # Ici, on envoie un signal ou on simule/relance le processus si nécessaire.
-    sync_status = "Signal de synchronisation des commandes envoyé au bot Discord."
+    sync_status = "Signal de synchronisation des commandes envoyé."
     return redirect(url_for("index"))
 
 @app.route("/sync/github", methods=["POST"])
 def sync_github():
     global sync_status
     try:
-        # Tente de faire un git pull local si le projet tourne dans un repo local tracké
         result = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            sync_status = "Mise à jour GitHub réussie (Git Pull exécuté)."
-        else:
-            sync_status = f"Erreur Git Pull : {result.stderr.strip()}"
-    except Exception as e:
-        sync_status = "Impossible d'exécuter le git pull (environnement cloud isolé ou non-git)."
+        sync_status = "Mise à jour GitHub réussie." if result.returncode == 0 else f"Erreur Git : {result.stderr.strip()}"
+    except Exception:
+        sync_status = "Environnement non-git ou isolé."
     return redirect(url_for("index"))
 
 @app.route("/sync/render", methods=["POST"])
 def sync_render():
     global sync_status
-    # Render déploie automatiquement à chaque push GitHub. 
-    # Pour forcer via dashboard, on peut utiliser un Webhook Deploy Render si configuré, ou informer l'utilisateur.
-    render_webhook = os.environ.get("RENDER_DEPLOY_HOOK_URL")
-    if render_webhook:
+    webhook = os.environ.get("RENDER_DEPLOY_HOOK_URL")
+    if webhook:
         import urllib.request
         try:
-            urllib.request.urlopen(render_webhook, data=b"")
-            sync_status = "Ordre de redéploiement transmis à Render avec succès !"
+            urllib.request.urlopen(webhook, data=b"")
+            sync_status = "Redéploiement Render déclenché !"
         except Exception as e:
-            sync_status = f"Échec du déclenchement du webhook Render : {e}"
+            sync_status = f"Erreur webhook : {e}"
     else:
-        sync_status = "Redéploiement demandé. (Astuce : ajoute ton Render Deploy Hook en variable d'environnement 'RENDER_DEPLOY_HOOK_URL' pour l'activer)."
+        sync_status = "Variable RENDER_DEPLOY_HOOK_URL non configurée."
     return redirect(url_for("index"))
 
 def run_dashboard():
