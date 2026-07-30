@@ -4,6 +4,7 @@ import discord
 import threading
 from discord import app_commands
 from discord.ext import commands
+from dashboard import run_dashboard
 
 # ── 1. CONFIGURATION DES INTENTS & DU BOT ──────────────────────────────────────
 
@@ -16,7 +17,6 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ── DICTIONNAIRES DE STOCKAGE (EN MÉMOIRE) ────────────────────────────────────
-# Pour un vrai projet persistant, tu pourras les lier à une base de données (SQLite/MongoDB)
 active_guesses = {}
 user_balances = {}  # user_id -> {"wallet": int, "bank": int}
 user_levels = {}    # user_id -> {"xp": int, "level": int}
@@ -82,20 +82,17 @@ async def handle_leveling(message: discord.Message):
     if user_id not in user_levels:
         user_levels[user_id] = {"xp": 0, "level": 1}
 
-    # Gain aléatoire d'XP par message (entre 15 et 25)
     xp_gain = random.randint(15, 25)
     user_levels[user_id]["xp"] += xp_gain
 
     current_data = user_levels[user_id]
     current_level = current_data["level"]
     current_xp = current_data["xp"]
-
-    # Seuil d'XP nécessaire pour passer au niveau supérieur (ex: niveau * 100)
     xp_needed = current_level * 100
 
     if current_xp >= xp_needed:
         current_data["level"] += 1
-        current_data["xp"] = 0  # Remet l'XP à 0 ou conserve le surplus
+        current_data["xp"] = 0
         await message.channel.send(
             f"🎉 Félicitations {message.author.mention} ! Tu passes au niveau **{current_data['level']}** !"
         )
@@ -151,7 +148,7 @@ async def balance(interaction: discord.Interaction, member: discord.Member = Non
     user_id = target.id
 
     if user_id not in user_balances:
-        user_balances[user_id] = {"wallet": 200, "bank": 0}  # 200 pièces offertes au départ
+        user_balances[user_id] = {"wallet": 200, "bank": 0}
 
     bal = user_balances[user_id]
     embed = discord.Embed(
@@ -184,27 +181,6 @@ async def level(interaction: discord.Interaction, member: discord.Member = None)
     await interaction.response.send_message(embed=embed)
 
 
-# ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
-
-@bot.event
-async def on_ready():
-    print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synchronisé {len(synced)} commandes slash.")
-    except Exception as e:
-        print(e)
-
-@bot.event
-async def on_message(message: discord.Message):
-    # 1. Traite le jeu Guess the Number
-    await GuessGameView.handle_guess_message(message)
-    
-    # 2. Traite l'attribution d'XP pour les niveaux
-    await handle_leveling(message)
-    
-    # Laisse passer les autres commandes
-    await bot.process_commands(message)
 @bot.tree.command(name="higherlower", description="Parie des coins sur un jeu de Higher/Lower")
 @app_commands.describe(bet="Montant de ta mise", choice="Choisis 'higher' (plus haut) ou 'lower' (plus bas)")
 @app_commands.choices(choice=[
@@ -214,7 +190,6 @@ async def on_message(message: discord.Message):
 async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
     user_id = interaction.user.id
 
-    # Vérification du solde
     if user_id not in user_balances:
         user_balances[user_id] = {"wallet": 200, "bank": 0}
 
@@ -226,14 +201,11 @@ async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
         await interaction.response.send_message("❌ Tu n'as pas assez d'argent dans ton portefeuille !", ephemeral=True)
         return
 
-    # Déduction de la mise
     user_balances[user_id]["wallet"] -= bet
 
-    # Génération des nombres (entre 1 et 100)
     base_number = random.randint(1, 50)
     secret_number = random.randint(1, 100)
 
-    # Résolution
     won = False
     if choice == "higher" and secret_number > base_number:
         won = True
@@ -258,7 +230,9 @@ async def higher_lower(interaction: discord.Interaction, bet: int, choice: str):
         embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
-    @bot.tree.command(name="roulette", description="Parie des coins à la roulette (red, black ou green)")
+
+
+@bot.tree.command(name="roulette", description="Parie des coins à la roulette (red, black ou green)")
 @app_commands.describe(bet="Montant de ta mise", choice="Choisis red, black ou green")
 @app_commands.choices(choice=[
     app_commands.Choice(name="Rouge (x2)", value="red"),
@@ -281,7 +255,6 @@ async def roulette(interaction: discord.Interaction, bet: int, choice: str):
 
     user_balances[user_id]["wallet"] -= bet
 
-    # Simulation de la roue (Rouge: 45%, Noir: 45%, Vert: 10%)
     roll = random.choices(["red", "black", "green"], weights=[45, 45, 10])[0]
 
     embed = discord.Embed(title="🎰 Roulette Casino", color=discord.Color.dark_embed())
@@ -299,6 +272,8 @@ async def roulette(interaction: discord.Interaction, bet: int, choice: str):
         embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="casino", description="Joue à la machine à sous (Slot Machine)")
 @app_commands.describe(bet="Montant de ta mise")
 async def casino(interaction: discord.Interaction, bet: int):
@@ -317,18 +292,15 @@ async def casino(interaction: discord.Interaction, bet: int):
 
     user_balances[user_id]["wallet"] -= bet
 
-    # Symboles de la machine à sous
     symbols = ["🍒", "🍋", "🍊", "🔔", "⭐", "💎"]
-    weights = [35, 30, 20, 10, 4, 1]  # Plus le symbole est rare, plus il rapporte
+    weights = [35, 30, 20, 10, 4, 1]
 
     result = random.choices(symbols, weights=weights, k=3)
 
     embed = discord.Embed(title="🎰 Machine à Sous", color=discord.Color.blue())
     embed.add_field(name="Tirage", value=f"| {result[0]} | {result[1]} | {result[2]} |", inline=False)
 
-    # Calcul des gains
     if result[0] == result[1] == result[2]:
-        # 3 symboles identiques (gros gain selon le symbole)
         multiplier_dict = {"🍒": 5, "🍋": 10, "🍊": 15, "🔔": 25, "⭐": 50, "💎": 100}
         mult = multiplier_dict.get(result[0], 5)
         winnings = bet * mult
@@ -336,7 +308,6 @@ async def casino(interaction: discord.Interaction, bet: int):
         embed.description = f"🎉 TRIPLÉ ! 3 symboles **{result[0]}** ! Tu remportes **{winnings}** coins (x{mult}) !"
         embed.color = discord.Color.green()
     elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
-        # 2 symboles identiques (petit remboursement)
         winnings = int(bet * 1.5)
         user_balances[user_id]["wallet"] += winnings
         embed.description = f"✨ Pas mal ! 2 symboles identiques. Tu récupères **{winnings}** coins."
@@ -346,15 +317,32 @@ async def casino(interaction: discord.Interaction, bet: int):
         embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
-# ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
+
+
+# ── 5. ÉVÉNEMENTS DU BOT ──────────────────────────────────────────────────────
+
+@bot.event
+async def on_ready():
+    print(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synchronisé {len(synced)} commandes slash.")
+    except Exception as e:
+        print(e)
+
+@bot.event
+async def on_message(message: discord.Message):
+    await GuessGameView.handle_guess_message(message)
+    await handle_leveling(message)
+    await bot.process_commands(message)
+
+
+# ── 6. LANCEMENT GLOBAL ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Lance le dashboard Flask en arrière-plan (dans un thread)
     dashboard_thread = threading.Thread(target=run_dashboard)
     dashboard_thread.daemon = True
     dashboard_thread.start()
     print("🌐 Dashboard web démarré en arrière-plan.")
 
-    # Lance le bot Discord
     bot.run(os.environ.get("DISCORD_TOKEN"))
-    
