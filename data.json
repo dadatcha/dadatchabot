@@ -9,29 +9,21 @@
         "addmoney": "admin",
         "removemoney": "admin",
         "setlevel": "admin",
-        "reminders": "admin"
+        "resetlevel": "admin",
+        "reminders": "admin",
+        "add": "admin",
+        "delete": "admin",
+        "toggle": "admin",
+        "sync": "admin",
+        "custom_command": "admin",
+        "levels": "admin"
     },
-    "reminders": {
-        "1": {
-            "title": "time to drink water my dearest members. im doing this reminder cuz i take care of you and im thinking about your healty <3 water4ever ",
-            "channel_id": 1518745569705721948,
-            "role_name": "time to drink water",
-            "interval_minutes": 90
-        }
-    },
+    "banned_roles": [],
+    "reminders": {},
     "level_config": {
+        "xp_per_message": 15,
         "xp_multiplier": 1.0,
-        "money_per_level": 1000,
-        "xp_per_message": 0
+        "money_per_level": 100
     },
-    "custom_commands": {
-        "vouch": {
-            "role_name": "",
-            "add_levels": 1,
-            "add_money": 0
-        }
-    },
-    "banned_roles": [
-        "scammer"
-    ]
+    "custom_commands": {}
 }
