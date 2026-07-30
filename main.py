@@ -1,6 +1,7 @@
 import os
 import random
 import discord
+import threading
 from discord import app_commands
 from discord.ext import commands
 
@@ -348,5 +349,12 @@ async def casino(interaction: discord.Interaction, bet: int):
 # ── 6. LANCEMENT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Lance le dashboard Flask en arrière-plan (dans un thread)
+    dashboard_thread = threading.Thread(target=run_dashboard)
+    dashboard_thread.daemon = True
+    dashboard_thread.start()
+    print("🌐 Dashboard web démarré en arrière-plan.")
+
+    # Lance le bot Discord
     bot.run(os.environ.get("DISCORD_TOKEN"))
     
