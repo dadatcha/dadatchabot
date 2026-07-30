@@ -130,7 +130,7 @@ DASHBOARD_TEMPLATE = """
         .btn-sync-render { background-color: #46e3b7; color: #0f172a; }
         .btn:hover { opacity: 0.9; }
         form.inline-form { display: inline; }
-        .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+        .form-grid { margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
         .form-grid-2 { margin-top: 15px; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr; gap: 10px; }
         input, select { padding: 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
         .sync-container { display: flex; gap: 15px; flex-wrap: wrap; margin-top: 20px; }
@@ -154,7 +154,7 @@ DASHBOARD_TEMPLATE = """
         
         <h2>📊 Fonctionnement des Niveaux (XP)</h2>
         <form action="/levels/config" method="POST">
-            <div class="form-grid" style="grid-template-columns: 1fr 1fr 1fr;">
+            <div class="form-grid">
                 <div>
                     <label>Multiplicateur d'XP :</label>
                     <input type="number" step="0.1" name="xp_multiplier" value="{{ level_config.xp_multiplier }}" required>
@@ -164,20 +164,20 @@ DASHBOARD_TEMPLATE = """
                     <input type="number" name="money_per_level" value="{{ level_config.money_per_level }}" required>
                 </div>
                 <div style="display: flex; align-items: flex-end;">
-                    <button type="submit" class="btn btn-add" style="margin-top:0;">💾 Sauvegarder les Niveaux</button>
+                    <button type="submit" class="btn btn-add" style="margin-top:0;">💾 Sauvegarder</button>
                 </div>
             </div>
         </form>
 
         <h2>🎁 Commandes Personnalisées de Récompense</h2>
         <table>
-            <tr><th>Nom de la commande</th><th>Rôle attribué</th><th>XP ajouté</th><th>Argent ajouté</th><th>Action</th></tr>
+            <tr><th>Nom de la commande</th><th>Rôle attribué</th><th>Niveaux ajoutés</th><th>Argent ajouté</th><th>Action</th></tr>
             {% if custom_commands %}
                 {% for cmd_name, cmd_data in custom_commands.items() %}
                 <tr>
                     <td><strong>/{{ cmd_name }}</strong></td>
                     <td>@{{ cmd_data.role_name if cmd_data.role_name else 'Aucun' }}</td>
-                    <td>+{{ cmd_data.add_xp }} XP</td>
+                    <td>+{{ cmd_data.add_levels }} Niveaux</td>
                     <td>+{{ cmd_data.add_money }} 🪙</td>
                     <td>
                         <form action="/custom-command/delete/{{ cmd_name }}" method="POST" class="inline-form">
@@ -195,7 +195,7 @@ DASHBOARD_TEMPLATE = """
             <div class="form-grid-2">
                 <input type="text" name="cmd_name" placeholder="Nom de la commande (ex: bonus)" required>
                 <input type="text" name="role_name" placeholder="Rôle à donner (optionnel)">
-                <input type="number" name="add_xp" placeholder="XP à ajouter" value="0" required>
+                <input type="number" name="add_levels" placeholder="Niveaux à ajouter" value="0" required>
                 <input type="number" name="add_money" placeholder="Argent à ajouter" value="0" required>
                 <button type="submit" class="btn btn-add" style="margin-top:0;">➕ Créer</button>
             </div>
@@ -289,13 +289,13 @@ def add_custom_command():
     cmd_name = request.form.get("cmd_name", "").strip().lower().lstrip("/")
     role_name = request.form.get("role_name", "").strip().lstrip("@")
     try:
-        add_xp = int(request.form.get("add_xp", 0))
+        add_levels = int(request.form.get("add_levels", 0))
         add_money = int(request.form.get("add_money", 0))
         
         if cmd_name:
             custom_commands[cmd_name] = {
                 "role_name": role_name,
-                "add_xp": add_xp,
+                "add_levels": add_levels,
                 "add_money": add_money
             }
             db["custom_commands"] = custom_commands
