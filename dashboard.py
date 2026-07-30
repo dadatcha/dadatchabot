@@ -174,8 +174,7 @@ def sync_github():
         # Vérifie si le dossier .git existe, sinon l'initialise
         if not os.path.isdir(".git"):
             subprocess.run(["git", "init"], capture_output=True, text=True, check=True)
-            # Remplace l'URL ci-dessous par l'URL HTTPS de ton propre dépôt GitHub (ex: https://github.com/ton-pseudo/ton-repo.git)
-            repo_url = "https://github.com/dadatcha/dadatchabot.git"
+            repo_url = os.environ.get("GITHUB_REPO_URL", "https://github.com/dadatcha/dadatchabot.git")
             subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
 
         # Force la configuration de la branche et récupère les codes
