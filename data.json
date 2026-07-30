@@ -1,0 +1,15 @@
+{
+    "permissions": {
+        "startguess": "admin",
+        "higherlower": "everyone",
+        "roulette": "everyone",
+        "casino": "everyone",
+        "balance": "everyone",
+        "level": "everyone",
+        "addmoney": "admin",
+        "removemoney": "admin",
+        "setlevel": "admin",
+        "reminders": "admin"
+    },
+    "reminders": {}
+}
