@@ -110,7 +110,7 @@ class GiveawayParticipationView(discord.ui.View):
             await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
 
 
-async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds, view, message):
+async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds, view, message, giveaway_role):
     await asyncio.sleep(duration_seconds)
     
     if not view.participants:
@@ -147,8 +147,37 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
             user_levels[winner_id]["level"] += lvl_add
             reward_msg = f"\n📊 Son niveau a augmenté de +{lvl_add} !"
 
-        elif prize_type in ["Rôle Permanent", "Rôle Temporaire"]:
-            reward_msg = f"\n👑 Pensez à attribuer le rôle correspondant au gagnant !"
+        elif prize_type == "Rôle Permanent":
+            if giveaway_role:
+                try:
+                    await winner_member.add_roles(giveaway_role, reason=f"Victoire au giveaway : {prize}")
+                    reward_msg = f"\n👑 Le rôle permanent {giveaway_role.mention} lui a été attribué !"
+                except discord.Forbidden:
+                    reward_msg = f"\n⚠️ Je n'ai pas les permissions pour lui attribuer le rôle {giveaway_role.mention}."
+            else:
+                reward_msg = f"\n⚠️ Aucun rôle n'avait été sélectionné dans le panneau."
+
+        elif prize_type == "Rôle Temporaire":
+            if giveaway_role:
+                try:
+                    await winner_member.add_roles(giveaway_role, reason=f"Victoire au giveaway temporaire : {prize}")
+                    reward_msg = f"\n⏱️ Le rôle temporaire {giveaway_role.mention} lui a été attribué pour 12 heures !"
+                    
+                    # Tâche de fond pour retirer le rôle après 12 heures (43200 secondes)
+                    async def remove_temporary_role():
+                        await asyncio.sleep(86400)
+                        try:
+                            await winner_member.remove_roles(giveaway_role, reason="Expiration du rôle temporaire de giveaway")
+                            await channel.send(f"⏳ Le rôle temporaire {giveaway_role.mention} a été retiré à {winner_member.mention}.")
+                        except Exception:
+                            pass
+                    
+                    bot.loop.create_task(remove_temporary_role())
+
+                except discord.Forbidden:
+                    reward_msg = f"\n⚠️ Je n'ai pas les permissions pour lui attribuer le rôle {giveaway_role.mention}."
+            else:
+                reward_msg = f"\n⚠️ Aucun rôle n'avait été sélectionné dans le panneau."
 
     embed = discord.Embed(
         title="🎉 Giveaway Terminé !", 
@@ -188,6 +217,7 @@ class GiveawayPanel(discord.ui.View):
         self.prize_type = "Argent (Coins)"
         self.ping_role = None
         self.allowed_role = None
+        self.giveaway_role = None  # Rôle à gagner (permanent ou temporaire)
 
     async def update_panel(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -200,6 +230,7 @@ class GiveawayPanel(discord.ui.View):
         embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
         embed.add_field(name="🔔 Rôle mentionné", value=self.ping_role.mention if self.ping_role else "`Aucun`", inline=True)
         embed.add_field(name="🛡️ Rôle requis", value=self.allowed_role.mention if self.allowed_role else "`Aucun`", inline=True)
+        embed.add_field(name="👑 Rôle à gagner (Si rôle)", value=self.giveaway_role.mention if self.giveaway_role else "`Aucun`", inline=True)
 
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -213,7 +244,7 @@ class GiveawayPanel(discord.ui.View):
         options=[
             discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
             discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
-            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire"),
+            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire (12h)"),
             discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
             discord.SelectOption(label="Item / Autre", description="Autre type de lot")
         ]
@@ -244,6 +275,17 @@ class GiveawayPanel(discord.ui.View):
         self.allowed_role = select.values[0] if select.values else None
         await self.update_panel(interaction)
 
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Choisir le rôle à attribuer au gagnant...",
+        row=4,
+        min_values=0,
+        max_values=1
+    )
+    async def select_giveaway_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.giveaway_role = select.values[0] if select.values else None
+        await self.update_panel(interaction)
+
     @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=4)
     async def launch_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
@@ -257,7 +299,8 @@ class GiveawayPanel(discord.ui.View):
             description=f"🎁 **Lot :** {self.prize}\n"
                         f"📌 **Type :** {self.prize_type}\n"
                         f"⏱️ **Durée :** {self.duration} minute(s)\n"
-                        f"{f'🛡️ **Rôle requis :** {self.allowed_role.mention}' if self.allowed_role else ''}\n\n"
+                        f"{f'🛡️ **Rôle requis :** {self.allowed_role.mention}' if self.allowed_role else ''}\n"
+                        f"{f'👑 **Rôle à gagner :** {self.giveaway_role.mention}' if self.giveaway_role and self.prize_type in ['Rôle Permanent', 'Rôle Temporaire'] else ''}\n\n"
                         f"Clique sur le bouton **🎉 Participer** ci-dessous !",
             color=discord.Color.blue()
         )
@@ -271,7 +314,7 @@ class GiveawayPanel(discord.ui.View):
         await interaction.message.delete()
         message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
         
-        bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message))
+        bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message, self.giveaway_role))
 
 
 # ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
@@ -378,6 +421,7 @@ async def giveaway(interaction: discord.Interaction):
     embed.add_field(name="📌 Type de prix", value="`Argent (Coins)`", inline=True)
     embed.add_field(name="🔔 Rôle mentionné", value="`Aucun`", inline=True)
     embed.add_field(name="🛡️ Rôle requis", value="`Aucun`", inline=True)
+    embed.add_field(name="👑 Rôle à gagner (Si rôle)", value="`Aucun`", inline=True)
 
     await interaction.response.send_message(embed=embed, view=panel_view, ephemeral=True)
 
