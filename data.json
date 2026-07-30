@@ -23,5 +23,11 @@
         "xp_multiplier": 1.0,
         "money_per_level": 1000
     },
-    "custom_commands": {}
+    "custom_commands": {
+        "vouch": {
+            "role_name": "",
+            "add_levels": 1,
+            "add_money": 0
+        }
+    }
 }
