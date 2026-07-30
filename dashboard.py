@@ -170,14 +170,20 @@ def sync_discord():
 @app.route("/sync/github", methods=["POST"])
 def sync_github():
     global sync_status
+    repo_url = "https://github.com/dadatcha/dadatchabot.git"
     try:
-        # Vérifie si le dossier .git existe, sinon l'initialise
         if not os.path.isdir(".git"):
             subprocess.run(["git", "init"], capture_output=True, text=True, check=True)
-            repo_url = os.environ.get("GITHUB_REPO_URL", "https://github.com/dadatcha/dadatchabot.git")
             subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
+        else:
+            # Vérifie si 'origin' existe déjà, sinon l'ajoute, sinon met à jour son URL
+            remotes = subprocess.run(["git", "remote"], capture_output=True, text=True)
+            if "origin" not in remotes.stdout:
+                subprocess.run(["git", "remote", "add", "origin", repo_url], capture_output=True, text=True)
+            else:
+                subprocess.run(["git", "remote", "set-url", "origin", repo_url], capture_output=True, text=True)
 
-        # Force la configuration de la branche et récupère les codes
+        # Force la récupération et le pull
         subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True, timeout=10)
         subprocess.run(["git", "branch", "-M", "main"], capture_output=True, text=True)
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, timeout=10)
