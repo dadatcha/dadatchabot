@@ -1,94 +1,48 @@
 import os
 import json
-import urllib.request
-import urllib.error
 import subprocess
 from flask import Flask, render_template_string, request, redirect, url_for
 
 app = Flask(__name__)
 
-# Configuration JSONBin.io
-JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "").strip()
+DATA_FILE = "data.json"
 
-default_permissions = {
-    "startguess": "admin",
-    "higherlower": "everyone",
-    "roulette": "everyone",
-    "casino": "everyone",
-    "balance": "everyone",
-    "level": "everyone",
-    "addmoney": "admin",
-    "removemoney": "admin",
-    "setlevel": "admin",
-    "reminders": "everyone"
+default_data = {
+    "permissions": {
+        "startguess": "admin",
+        "higherlower": "everyone",
+        "roulette": "everyone",
+        "casino": "everyone",
+        "balance": "everyone",
+        "level": "everyone",
+        "addmoney": "admin",
+        "removemoney": "admin",
+        "setlevel": "admin",
+        "reminders": "everyone"
+    },
+    "reminders": {}
 }
 
-# --- FONCTION ROBUSTE JSONBIN (AUTO-CREATION SI ID VIDE) ---
-def jsonbin_get_or_create(env_var_name, default_data):
-    bin_id = os.environ.get(env_var_name, "").strip()
-    
-    # Si la clé API est absente, on renvoie les données par défaut
-    if not JSONBIN_API_KEY:
-        print(f"[INFO] JSONBIN_API_KEY manquante pour {env_var_name}.")
-        return default_data
-
-    # Si on a un ID, on essaie de le lire
-    if bin_id:
+def load_data():
+    if os.path.exists(DATA_FILE):
         try:
-            url = f"https://api.jsonbin.io/v3/b/{bin_id}/latest"
-            req = urllib.request.Request(url, headers={"X-Master-Key": JSONBIN_API_KEY})
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode())
-                print(f"[SUCCES GET] Données chargées pour {env_var_name}")
-                return data.get("record", default_data)
-        except urllib.error.HTTPError as e:
-            print(f"[AVERTISSEMENT] Erreur {e.code} sur {env_var_name}, tentative de création d'un nouveau Bin...")
-        except Exception as e:
-            print(f"[AVERTISSEMENT] Erreur lecture {env_var_name} : {e}")
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default_data
 
-    # Si aucun ID valide n'est fourni ou si l'ancien échoue, on crée un Bin automatiquement !
+def save_data(data):
     try:
-        url = "https://api.jsonbin.io/v3/b"
-        payload = json.dumps(default_data).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={
-            "Content-Type": "application/json",
-            "X-Master-Key": JSONBIN_API_KEY,
-            "X-Bin-Name": env_var_name
-        }, method="POST")
-        with urllib.request.urlopen(req) as response:
-            res_data = json.loads(response.read().decode())
-            new_id = res_data["metadata"]["id"]
-            print(f"==================================================")
-            print(f"[NOUVEAU BIN CREE] Copie cet ID dans Render pour {env_var_name} : {new_id}")
-            print(f"==================================================")
-            return res_data.get("record", default_data)
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        print("[SUCCES] Données sauvegardées localement dans data.json")
     except Exception as e:
-        print(f"[ERREUR CRITIQUE] Impossible de créer le Bin {env_var_name} : {e}")
-        return default_data
+        print(f"[ERREUR] Impossible de sauvegarder : {e}")
 
-def jsonbin_save(env_var_name, data):
-    bin_id = os.environ.get(env_var_name, "").strip()
-    if not bin_id or not JSONBIN_API_KEY:
-        print(f"[ERREUR SAVE] Impossible de sauvegarder : ID ou clé manquante pour {env_var_name}.")
-        return
-    try:
-        url = f"https://api.jsonbin.io/v3/b/{bin_id}"
-        payload = json.dumps(data).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={
-            "Content-Type": "application/json",
-            "X-Master-Key": JSONBIN_API_KEY
-        }, method="PUT")
-        with urllib.request.urlopen(req) as response:
-            print(f"[SUCCES SAVE] Sauvegarde réussie sur {env_var_name} !")
-    except urllib.error.HTTPError as e:
-        error_details = e.read().decode()
-        print(f"[ERREUR HTTP {e.code}] Echec de sauvegarde sur {env_var_name} : {error_details}")
-    except Exception as e:
-        print(f"[ERREUR SAVE] : {e}")
-
-# --- CHARGEMENT ---
-command_permissions = jsonbin_get_or_create("PERMS_BIN_ID", default_permissions.copy())
-raw_reminders = jsonbin_get_or_create("REMINDERS_BIN_ID", {})
+db = load_data()
+command_permissions = db.get("permissions", default_data["permissions"])
+raw_reminders = db.get("reminders", {})
 reminders_db = {int(k): v for k, v in raw_reminders.items() if str(k).isdigit()}
 
 if reminders_db:
@@ -98,7 +52,6 @@ else:
 
 sync_status = None
 
-# --- TEMPLATE HTML DU DASHBOARD ---
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="fr">
@@ -198,7 +151,6 @@ DASHBOARD_TEMPLATE = """
 </html>
 """
 
-# --- ROUTES FLASK ---
 @app.route("/")
 def index():
     global sync_status
@@ -210,7 +162,8 @@ def index():
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
         command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
-        jsonbin_save("PERMS_BIN_ID", command_permissions)
+        db["permissions"] = command_permissions
+        save_data(db)
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
@@ -230,8 +183,8 @@ def add_reminder():
                 "interval_minutes": int(interval)
             }
             reminder_counter += 1
-            data_to_save = {str(k): v for k, v in reminders_db.items()}
-            jsonbin_save("REMINDERS_BIN_ID", data_to_save)
+            db["reminders"] = {str(k): v for k, v in reminders_db.items()}
+            save_data(db)
         except ValueError:
             pass
     return redirect(url_for("index"))
@@ -240,8 +193,8 @@ def add_reminder():
 def delete_reminder(r_id):
     if r_id in reminders_db:
         del reminders_db[r_id]
-        data_to_save = {str(k): v for k, v in reminders_db.items()}
-        jsonbin_save("REMINDERS_BIN_ID", data_to_save)
+        db["reminders"] = {str(k): v for k, v in reminders_db.items()}
+        save_data(db)
     return redirect(url_for("index"))
 
 @app.route("/sync/discord", methods=["POST"])
@@ -274,7 +227,7 @@ def sync_github():
         else:
             sync_status = f"Erreur Git : {result.stderr.strip()}"
     except Exception as e:
-            sync_status = f"Impossible d'exécuter la synchro GitHub : {e}"
+        sync_status = f"Impossible d'exécuter la synchro GitHub : {e}"
     return redirect(url_for("index"))
 
 @app.route("/sync/render", methods=["POST"])
