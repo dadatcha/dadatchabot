@@ -159,6 +159,7 @@ def index():
 def toggle_permission(cmd_name):
     if cmd_name in command_permissions:
         command_permissions[cmd_name] = "everyone" if command_permissions[cmd_name] == "admin" else "admin"
+        save_permissions(command_permissions) # <--- Indispensable pour enregistrer dans le fichier
     return redirect(url_for("index"))
 
 @app.route("/reminder/add", methods=["POST"])
