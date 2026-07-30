@@ -75,9 +75,9 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── SYSTÈME DE GIVEAWAY AVANCÉ ────────────────────────────────────────────────
+# ── SYSTÈME DE GIVEAWAY AVANCÉ & PANNEAU ──────────────────────────────────────
 
-class GiveawayView(discord.ui.View):
+class GiveawayParticipationView(discord.ui.View):
     def __init__(self, db_data, prize, prize_type, allowed_roles):
         super().__init__(timeout=None)
         self.db_data = db_data
@@ -91,14 +91,12 @@ class GiveawayView(discord.ui.View):
         user_role_names = [role.name for role in interaction.user.roles]
         user_role_ids = [role.id for role in interaction.user.roles]
 
-        # 1. Vérification des rôles interdits (global dashboard ou spécifique)
         banned_roles = self.db_data.get("banned_roles", [])
         for banned in banned_roles:
             if banned in user_role_names:
                 await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer.", ephemeral=True)
                 return
 
-        # 2. Vérification des rôles autorisés (si configurés pour ce giveaway)
         if self.allowed_roles:
             has_allowed_role = any(r in user_role_names or r in user_role_ids for r in self.allowed_roles)
             if not has_allowed_role:
@@ -129,11 +127,9 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
     guild = channel.guild
     winner_member = guild.get_member(winner_id)
 
-    # Attribution automatique selon le type de prix (si applicable)
     reward_msg = ""
     if winner_member:
-        if prize_type == "argent":
-            # Extrait un nombre du lot si possible (ex: "500 coins" -> 500), sinon donne 100 par défaut
+        if prize_type == "Argent (Coins)":
             import re
             numbers = re.findall(r'\d+', prize)
             amount = int(numbers[0]) if numbers else 100
@@ -142,7 +138,7 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
             user_balances[winner_id]["wallet"] += amount
             reward_msg = f"\n💰 **{amount} coins** ont été ajoutés à son portefeuille !"
             
-        elif prize_type == "niveau":
+        elif prize_type == "Niveau / XP":
             import re
             numbers = re.findall(r'\d+', prize)
             lvl_add = int(numbers[0]) if numbers else 1
@@ -151,16 +147,131 @@ async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds
             user_levels[winner_id]["level"] += lvl_add
             reward_msg = f"\n📊 Son niveau a augmenté de +{lvl_add} !"
 
-        elif prize_type in ["role_permanent", "role_temporaire"]:
+        elif prize_type in ["Rôle Permanent", "Rôle Temporaire"]:
             reward_msg = f"\n👑 Pensez à attribuer le rôle correspondant au gagnant !"
 
     embed = discord.Embed(
         title="🎉 Giveaway Terminé !", 
-        description=f"Type : **{prize_type.replace('_', ' ').upper()}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
+        description=f"Type : **{prize_type}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
         color=discord.Color.gold()
     )
     await message.edit(embed=embed, view=None)
     await channel.send(f"🎊 Félicitations <@{winner_id}> ! Tu remportes **{prize}** !")
+
+
+# Modal pour modifier le lot et la durée
+class GiveawayEditModal(discord.ui.Modal, title="Modifier le Lot et la Durée"):
+    prize_input = discord.ui.TextInput(label="Lot à gagner", placeholder="Ex: 500 Coins ou Rôle VIP", default="Nitro Classic")
+    duration_input = discord.ui.TextInput(label="Durée (en minutes)", placeholder="Ex: 5", default="5")
+
+    def __init__(self, panel_view):
+        super().__init__()
+        self.panel_view = panel_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.panel_view.prize = self.prize_input.value
+        try:
+            self.panel_view.duration = int(self.duration_input.value)
+        except ValueError:
+            self.panel_view.duration = 5
+        
+        await self.panel_view.update_panel(interaction)
+
+
+# Panneau de configuration interactif (Embed + Menus/Boutons)
+class GiveawayPanel(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction):
+        super().__init__(timeout=180)
+        self.interaction = interaction
+        self.prize = "Nitro Classic"
+        self.duration = 5
+        self.prize_type = "Argent (Coins)"
+        self.ping_role = None
+        self.allowed_role = None
+
+    async def update_panel(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="⚙️ Panneau de Configuration - Giveaway",
+            description="Personnalisez les paramètres de votre giveaway ci-dessous, puis cliquez sur **Lancer**.",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(name="🎁 Lot", value=f"`{self.prize}`", inline=True)
+        embed.add_field(name="⏱️ Durée", value=f"`{self.duration} minute(s)`", inline=True)
+        embed.add_field(name="📌 Type de prix", value=f"`{self.prize_type}`", inline=True)
+        embed.add_field(name="🔔 Rôle mentionné", value=self.ping_role.mention if self.ping_role else "`Aucun`", inline=True)
+        embed.add_field(name="🛡️ Rôle requis", value=self.allowed_role.mention if self.allowed_role else "`Aucun`", inline=True)
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="✏️ Modifier Lot & Durée", style=discord.ButtonStyle.primary, row=0)
+    async def edit_modal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GiveawayEditModal(self))
+
+    @discord.ui.select(
+        placeholder="Choisir le type de prix...",
+        row=1,
+        options=[
+            discord.SelectOption(label="Argent (Coins)", description="Donne des coins automatiquement"),
+            discord.SelectOption(label="Rôle Permanent", description="Attribution d'un rôle fixe"),
+            discord.SelectOption(label="Rôle Temporaire", description="Rôle temporaire"),
+            discord.SelectOption(label="Niveau / XP", description="Augmente le niveau"),
+            discord.SelectOption(label="Item / Autre", description="Autre type de lot")
+        ]
+    )
+    async def select_prize_type(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.prize_type = select.values[0]
+        await self.update_panel(interaction)
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Choisir un rôle à mentionner...",
+        row=2,
+        min_values=0,
+        max_values=1
+    )
+    async def select_ping_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.ping_role = select.values[0] if select.values else None
+        await self.update_panel(interaction)
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Choisir un rôle requis (optionnel)...",
+        row=3,
+        min_values=0,
+        max_values=1
+    )
+    async def select_allowed_role(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        self.allowed_role = select.values[0] if select.values else None
+        await self.update_panel(interaction)
+
+    @discord.ui.button(label="🚀 Lancer le Giveaway", style=discord.ButtonStyle.green, row=4)
+    async def launch_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            with open("data.json", "r", encoding="utf-8") as f:
+                db_data = json.load(f)
+        except FileNotFoundError:
+            db_data = {"permissions": {}, "banned_roles": []}
+
+        embed = discord.Embed(
+            title="🎉 GIBEAWAY 🎉",
+            description=f"🎁 **Lot :** {self.prize}\n"
+                        f"📌 **Type :** {self.prize_type}\n"
+                        f"⏱️ **Durée :** {self.duration} minute(s)\n"
+                        f"{f'🛡️ **Rôle requis :** {self.allowed_role.mention}' if self.allowed_role else ''}\n\n"
+                        f"Clique sur le bouton **🎉 Participer** ci-dessous !",
+            color=discord.Color.blue()
+        )
+
+        allowed_roles_list = [self.allowed_role.name] if self.allowed_role else []
+        view = GiveawayParticipationView(db_data, self.prize, self.prize_type, allowed_roles_list)
+        
+        content_to_send = self.ping_role.mention if self.ping_role else None
+        
+        # Supprime le panneau de config et lance le message public
+        await interaction.message.delete()
+        message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
+        
+        bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, self.prize, self.prize_type, self.duration * 60, view, message))
 
 
 # ── 3. SYSTÈME DE NIVEAUX (XP) ────────────────────────────────────────────────
@@ -232,29 +343,8 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="giveaway", description="Lance un giveaway personnalisé")
-@app_commands.describe(
-    prize="Le lot à gagner (ex: 500 Coins, Rôle VIP, etc.)",
-    duration="Durée en minutes",
-    prize_type="Type de prix",
-    ping_role="Rôle à mentionner au lancement (optionnel)",
-    allowed_role="Rôle requis pour participer (optionnel)"
-)
-@app_commands.choices(prize_type=[
-    app_commands.Choice(name="Argent (Coins)", value="argent"),
-    app_commands.Choice(name="Rôle Permanent", value="role_permanent"),
-    app_commands.Choice(name="Rôle Temporaire", value="role_temporaire"),
-    app_commands.Choice(name="Niveau / XP", value="niveau"),
-    app_commands.Choice(name="Item / Autre", value="item_autre")
-])
-async def giveaway(
-    interaction: discord.Interaction, 
-    prize: str, 
-    duration: int, 
-    prize_type: str, 
-    ping_role: discord.Role = None, 
-    allowed_role: discord.Role = None
-):
+@bot.tree.command(name="giveaway", description="Ouvre le panneau de configuration du Giveaway")
+async def giveaway(interaction: discord.Interaction):
     try:
         with open("data.json", "r", encoding="utf-8") as f:
             db_data = json.load(f)
@@ -276,27 +366,20 @@ async def giveaway(
             await interaction.response.send_message(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
             return
 
-    await interaction.response.send_message("🚀 Giveaway en cours de création...", ephemeral=True)
-
-    # Construction des rôles autorisés si renseignés
-    allowed_roles_list = [allowed_role.name] if allowed_role else []
-
+    panel_view = GiveawayPanel(interaction)
+    
     embed = discord.Embed(
-        title="🎉 GIVEAWAY 🎉",
-        description=f"🎁 **Lot :** {prize}\n"
-                    f"📌 **Type :** {prize_type.replace('_', ' ').capitalize()}\n"
-                    f"⏱️ **Durée :** {duration} minute(s)\n"
-                    f"{f'🛡️ **Rôle requis :** {allowed_role.mention}' if allowed_role else ''}\n\n"
-                    f"Clique sur le bouton **🎉 Participer** ci-dessous !",
-        color=discord.Color.blue()
+        title="⚙️ Panneau de Configuration - Giveaway",
+        description="Personnalisez les paramètres de votre giveaway ci-dessous, puis cliquez sur **Lancer**.",
+        color=discord.Color.blurple()
     )
-    
-    view = GiveawayView(db_data, prize, prize_type, allowed_roles_list)
-    
-    content_to_send = ping_role.mention if ping_role else None
-    message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
-    
-    bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, prize, prize_type, duration * 60, view, message))
+    embed.add_field(name="🎁 Lot", value="`Nitro Classic`", inline=True)
+    embed.add_field(name="⏱️ Durée", value="`5 minute(s)`", inline=True)
+    embed.add_field(name="📌 Type de prix", value="`Argent (Coins)`", inline=True)
+    embed.add_field(name="🔔 Rôle mentionné", value="`Aucun`", inline=True)
+    embed.add_field(name="🛡️ Rôle requis", value="`Aucun`", inline=True)
+
+    await interaction.response.send_message(embed=embed, view=panel_view, ephemeral=True)
 
 
 @bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
