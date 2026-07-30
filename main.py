@@ -75,23 +75,34 @@ class GuessGameView:
             await message.channel.send(embed=embed)
 
 
-# ── SYSTÈME DE GIVEAWAY ───────────────────────────────────────────────────────
+# ── SYSTÈME DE GIVEAWAY AVANCÉ ────────────────────────────────────────────────
 
 class GiveawayView(discord.ui.View):
-    def __init__(self, db_data, prize):
+    def __init__(self, db_data, prize, prize_type, allowed_roles):
         super().__init__(timeout=None)
         self.db_data = db_data
         self.prize = prize
+        self.prize_type = prize_type
+        self.allowed_roles = allowed_roles
         self.participants = set()
 
     @discord.ui.button(label="🎉 Participer", style=discord.ButtonStyle.green, custom_id="giveaway_join")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_role_names = [role.name for role in interaction.user.roles]
+        user_role_ids = [role.id for role in interaction.user.roles]
+
+        # 1. Vérification des rôles interdits (global dashboard ou spécifique)
         banned_roles = self.db_data.get("banned_roles", [])
-        user_roles = [role.name for role in interaction.user.roles]
-        
         for banned in banned_roles:
-            if banned in user_roles:
-                await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer aux giveaways.", ephemeral=True)
+            if banned in user_role_names:
+                await interaction.response.send_message(f"❌ Tu possèdes le rôle interdit **@{banned}** et ne peux pas participer.", ephemeral=True)
+                return
+
+        # 2. Vérification des rôles autorisés (si configurés pour ce giveaway)
+        if self.allowed_roles:
+            has_allowed_role = any(r in user_role_names or r in user_role_ids for r in self.allowed_roles)
+            if not has_allowed_role:
+                await interaction.response.send_message("❌ Tu ne possèdes pas l'un des rôles requis pour participer à ce giveaway.", ephemeral=True)
                 return
 
         if interaction.user.id in self.participants:
@@ -101,13 +112,13 @@ class GiveawayView(discord.ui.View):
             await interaction.response.send_message("✅ Ta participation a bien été enregistrée !", ephemeral=True)
 
 
-async def start_giveaway_timer(bot, channel, prize, duration_seconds, view, message):
+async def start_giveaway_timer(bot, channel, prize, prize_type, duration_seconds, view, message):
     await asyncio.sleep(duration_seconds)
     
     if not view.participants:
         embed = discord.Embed(
             title="🎉 Giveaway Terminé !", 
-            description=f"Lot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
+            description=f"Type : **{prize_type.upper()}**\nLot : **{prize}**\n\n❌ Annulé : Aucun participant.", 
             color=discord.Color.red()
         )
         await message.edit(embed=embed, view=None)
@@ -115,10 +126,37 @@ async def start_giveaway_timer(bot, channel, prize, duration_seconds, view, mess
         return
 
     winner_id = random.choice(list(view.participants))
-    
+    guild = channel.guild
+    winner_member = guild.get_member(winner_id)
+
+    # Attribution automatique selon le type de prix (si applicable)
+    reward_msg = ""
+    if winner_member:
+        if prize_type == "argent":
+            # Extrait un nombre du lot si possible (ex: "500 coins" -> 500), sinon donne 100 par défaut
+            import re
+            numbers = re.findall(r'\d+', prize)
+            amount = int(numbers[0]) if numbers else 100
+            if winner_id not in user_balances:
+                user_balances[winner_id] = {"wallet": 200, "bank": 0}
+            user_balances[winner_id]["wallet"] += amount
+            reward_msg = f"\n💰 **{amount} coins** ont été ajoutés à son portefeuille !"
+            
+        elif prize_type == "niveau":
+            import re
+            numbers = re.findall(r'\d+', prize)
+            lvl_add = int(numbers[0]) if numbers else 1
+            if winner_id not in user_levels:
+                user_levels[winner_id] = {"xp": 0, "level": 1}
+            user_levels[winner_id]["level"] += lvl_add
+            reward_msg = f"\n📊 Son niveau a augmenté de +{lvl_add} !"
+
+        elif prize_type in ["role_permanent", "role_temporaire"]:
+            reward_msg = f"\n👑 Pensez à attribuer le rôle correspondant au gagnant !"
+
     embed = discord.Embed(
         title="🎉 Giveaway Terminé !", 
-        description=f"Lot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>", 
+        description=f"Type : **{prize_type.replace('_', ' ').upper()}**\nLot : **{prize}**\n\n🏆 **Gagnant :** <@{winner_id}>{reward_msg}", 
         color=discord.Color.gold()
     )
     await message.edit(embed=embed, view=None)
@@ -194,9 +232,29 @@ async def start_guess(interaction: discord.Interaction, min_num: int = 1, max_nu
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="giveaway", description="Lance un giveaway (selon les permissions configurées)")
-@app_commands.describe(prize="Le lot à gagner", duration="Durée en minutes")
-async def giveaway(interaction: discord.Interaction, prize: str, duration: int):
+@bot.tree.command(name="giveaway", description="Lance un giveaway personnalisé")
+@app_commands.describe(
+    prize="Le lot à gagner (ex: 500 Coins, Rôle VIP, etc.)",
+    duration="Durée en minutes",
+    prize_type="Type de prix",
+    ping_role="Rôle à mentionner au lancement (optionnel)",
+    allowed_role="Rôle requis pour participer (optionnel)"
+)
+@app_commands.choices(prize_type=[
+    app_commands.Choice(name="Argent (Coins)", value="argent"),
+    app_commands.Choice(name="Rôle Permanent", value="role_permanent"),
+    app_commands.Choice(name="Rôle Temporaire", value="role_temporaire"),
+    app_commands.Choice(name="Niveau / XP", value="niveau"),
+    app_commands.Choice(name="Item / Autre", value="item_autre")
+])
+async def giveaway(
+    interaction: discord.Interaction, 
+    prize: str, 
+    duration: int, 
+    prize_type: str, 
+    ping_role: discord.Role = None, 
+    allowed_role: discord.Role = None
+):
     try:
         with open("data.json", "r", encoding="utf-8") as f:
             db_data = json.load(f)
@@ -218,18 +276,27 @@ async def giveaway(interaction: discord.Interaction, prize: str, duration: int):
             await interaction.response.send_message(f"❌ Ton rôle **@{banned}** t'interdit d'utiliser cette commande.", ephemeral=True)
             return
 
-    await interaction.response.send_message(f"🚀 Giveaway lancé pour **{prize}** !", ephemeral=True)
-    
+    await interaction.response.send_message("🚀 Giveaway en cours de création...", ephemeral=True)
+
+    # Construction des rôles autorisés si renseignés
+    allowed_roles_list = [allowed_role.name] if allowed_role else []
+
     embed = discord.Embed(
-        title="🎉 GIVEAWAY 🎉",
-        description=f"Lot à gagner : **{prize}**\n\nClique sur le bouton ci-dessous pour participer !\n⏱️ Durée : **{duration} minute(s)**",
+        title="🎉 GIBEAWAY 🎉",
+        description=f"🎁 **Lot :** {prize}\n"
+                    f"📌 **Type :** {prize_type.replace('_', ' ').capitalize()}\n"
+                    f"⏱️ **Durée :** {duration} minute(s)\n"
+                    f"{f'🛡️ **Rôle requis :** {allowed_role.mention}' if allowed_role else ''}\n\n"
+                    f"Clique sur le bouton **🎉 Participer** ci-dessous !",
         color=discord.Color.blue()
     )
     
-    view = GiveawayView(db_data, prize)
-    message = await interaction.channel.send(embed=embed, view=view)
+    view = GiveawayView(db_data, prize, prize_type, allowed_roles_list)
     
-    bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, prize, duration * 60, view, message))
+    content_to_send = ping_role.mention if ping_role else None
+    message = await interaction.channel.send(content=content_to_send, embed=embed, view=view)
+    
+    bot.loop.create_task(start_giveaway_timer(bot, interaction.channel, prize, prize_type, duration * 60, view, message))
 
 
 @bot.tree.command(name="balance", description="Vérifie ton solde ou celui d'un autre membre")
