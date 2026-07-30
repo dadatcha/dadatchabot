@@ -171,10 +171,18 @@ def sync_discord():
 def sync_github():
     global sync_status
     try:
-        result = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=10)
-        sync_status = "Mise à jour GitHub réussie." if result.returncode == 0 else f"Erreur Git : {result.stderr.strip()}"
-    except Exception:
-        sync_status = "Environnement non-git ou isolé."
+        # 1. Force la récupération des dernières données depuis GitHub
+        subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True, timeout=10)
+        
+        # 2. Force le pull sur la branche principale (remplace 'main' par 'master' si ton dépôt utilise master)
+        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, timeout=10)
+        
+        if result.returncode == 0:
+            sync_status = "Mise à jour GitHub réussie (Git Pull origin main exécuté)."
+        else:
+            sync_status = f"Erreur Git : {result.stderr.strip()}"
+    except Exception as e:
+        sync_status = f"Impossible d'exécuter le git pull : {e}"
     return redirect(url_for("index"))
 
 @app.route("/sync/render", methods=["POST"])
